@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
+from uuid import uuid4
 
 import httpx
 
@@ -45,8 +46,9 @@ def utc(moment: datetime) -> str:
 
 def seed_people(setup: httpx.Client, patients: int = 5, practitioners: int = 3) -> tuple[list[str], list[str]]:
     """Create synthetic patients and practitioners and return their references."""
+    run_id = uuid4().hex
     def create(kind: str, number: int) -> str:
-        body = {"resourceType": kind, "name": [{"family": "Readback-Synthetic", "given": [f"{kind}{number}"]}]}
+        body = {"resourceType": kind, "name": [{"family": f"Readback-Synthetic-{run_id}", "given": [f"{kind}{number}"]}]}
         response = setup.post(kind, json=body)
         response.raise_for_status()
         return f"{kind}/{response.json()['id']}"

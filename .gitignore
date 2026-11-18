@@ -4,3 +4,8 @@ __pycache__/
 *.jsonl
 .env
 results*.json
+dist/
+build/
+graphify-out/
+.test-tmp*/
+.test-python*/

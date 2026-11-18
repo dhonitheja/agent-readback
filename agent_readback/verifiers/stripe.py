@@ -6,7 +6,8 @@ Action:
 
 It lists refunds for the payment intent before and after the action. A refund
 that was claimed but is absent is `missing`; a wrong amount or currency is
-`wrong_value`; a second new refund is `extra_effect` (a double refund).
+`wrong_value`; a second new refund is `extra_effect` (a double refund). A refund
+still `pending` with the bank is `unverified`, not `verified`: re-check later.
 
 Build the client with a restricted, read-only Stripe key, for example:
     httpx.Client(base_url="https://api.stripe.com", auth=(RESTRICTED_KEY, ""))
@@ -22,6 +23,7 @@ from ..core import Claim, Finding, FindingKind, Status, Verdict, compare_fields
 
 CREATE = "stripe.refund.create"
 FIELDS = ("id", "amount", "currency", "status", "payment_intent", "charge")
+MAX_PAGES = 50  # 5000 refunds on one payment intent; a server that pages forever gets `unverified`, not a hang
 
 
 class StripeRefundVerifier:
@@ -31,7 +33,7 @@ class StripeRefundVerifier:
     def _refunds(self, payment_intent: str) -> dict[str, dict[str, Any]]:
         found: dict[str, dict[str, Any]] = {}
         params: dict[str, Any] = {"payment_intent": payment_intent, "limit": 100}
-        while True:
+        for _ in range(MAX_PAGES):
             response = self.client.get("/v1/refunds", params=params)
             response.raise_for_status()
             page = response.json()
@@ -40,6 +42,7 @@ class StripeRefundVerifier:
             if not page.get("has_more") or not page.get("data"):
                 return found
             params["starting_after"] = page["data"][-1]["id"]
+        raise ValueError(f"more than {MAX_PAGES} pages of refunds; refusing to continue")
 
     def snapshot(self, claim: Claim) -> set[str] | None:
         try:
@@ -67,6 +70,9 @@ class StripeRefundVerifier:
         ranked = sorted(created, key=lambda item: len(compare_fields(claim.expected, item)))
         best, others = ranked[0], ranked[1:]
         findings = compare_fields(claim.expected, best)
+        if "status" not in claim.expected and best.get("status") == "pending":
+            # Not yet settled by the bank: neither proven nor contradicted. Re-check later.
+            return unreachable(f"refund {best['id']} is still pending")
         if "status" not in claim.expected and best.get("status") in ("failed", "canceled"):
             findings.append(
                 Finding(FindingKind.WRONG_VALUE, f"refund status is {best['status']!r}", "status", "succeeded", best["status"])

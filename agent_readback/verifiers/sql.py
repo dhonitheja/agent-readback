@@ -87,7 +87,10 @@ class SqlRowVerifier:
             findings.append(
                 Finding(FindingKind.EXTRA_EFFECT, f"{growth - allowed_growth} unclaimed row(s) were added", actual=growth)
             )
-        elif growth < 0:
-            findings.append(Finding(FindingKind.EXTRA_EFFECT, f"{-growth} row(s) were removed", actual=growth))
+        else:
+            inserted = int(claim.action == INSERT and row_before is None and row is not None)
+            removed = inserted - growth
+            if removed > 0:
+                findings.append(Finding(FindingKind.EXTRA_EFFECT, f"{removed} row(s) were removed", actual=growth))
         status = Status.VERIFIED if not findings else Status.FAILED
         return Verdict(status, claim, tuple(findings), {"row": row, "row_count": count})

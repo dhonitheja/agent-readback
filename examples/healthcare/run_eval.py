@@ -34,7 +34,7 @@ import httpx
 from agent_readback import Claim, EvidenceLog, Status, watch
 from agent_readback.verifiers import FhirAppointmentVerifier
 
-from .llm import AnthropicProvider, OpenAICompatProvider, ScriptedProvider
+from .llm import AnthropicProvider, OpenAICompatProvider, OpenAIResponsesProvider, ScriptedProvider
 from .mock_fhir import FAULTS, MockFhirServer
 from .tasks import Task, make_task, seed_people
 from .tools import SYSTEM_PROMPT, TOOL_SCHEMAS, make_tools
@@ -45,6 +45,8 @@ WRITE_FAULTS = [fault for fault in FAULTS if fault != "ok"]
 def build_provider(args: argparse.Namespace, current: dict[str, Task]) -> Any:
     if args.provider == "scripted":
         return ScriptedProvider(lambda prompt, call: current["task"].oracle(call))
+    from ..stripe_sandbox import _load_env_file  # ponytail: shared .env loader; real env vars win
+    _load_env_file()
     variable = "ANTHROPIC_API_KEY" if args.provider == "anthropic" else "OPENAI_API_KEY"
     key = os.environ.get(variable)
     if not key:
@@ -53,7 +55,12 @@ def build_provider(args: argparse.Namespace, current: dict[str, Task]) -> Any:
         sys.exit("Pass --model, for example claude-haiku-5-5 or gpt-6-luna.")
     if args.provider == "anthropic":
         return AnthropicProvider(args.model, key)
-    return OpenAICompatProvider(args.model, key, base_url=args.base_url)
+    if args.provider == "openai-responses":
+        return OpenAIResponsesProvider(
+            args.model, key, base_url=args.base_url, reasoning_effort=args.reasoning_effort or None,
+            store=not args.no_store,
+        )
+    return OpenAICompatProvider(args.model, key, base_url=args.base_url, reasoning_effort=args.reasoning_effort or None)
 
 
 def safe_caller(tools: dict[str, Any]):
@@ -81,7 +88,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     setup, agent_client, verifier_client = new_client(), new_client(), new_client()
 
     verifier = FhirAppointmentVerifier(verifier_client)
-    args.log.unlink(missing_ok=True)
+    if args.log.exists():
+        sys.exit(f"{args.log} already exists; pass a fresh --log path (an evidence log is never overwritten)")
     log = EvidenceLog(args.log, keep_fields="*" if args.keep_values else ())
     current: dict[str, Task] = {}
     provider = build_provider(args, current)
@@ -91,6 +99,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     outcomes: Counter[str] = Counter()
     kinds: Counter[str] = Counter()
     by_task: dict[str, Counter[str]] = {}
+    warned_model_error = False
 
     for index in range(args.runs):
         task = make_task(rng, index, setup, patients, practitioners)  # setup writes happen fault-free
@@ -104,7 +113,13 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             try:
                 message = provider.run(SYSTEM_PROMPT, task.prompt, TOOL_SCHEMAS, call_tool)
             except httpx.HTTPError as error:
-                message = f"FAILED: model request error ({type(error).__name__})"
+                detail = type(error).__name__
+                if isinstance(error, httpx.HTTPStatusError):
+                    detail += f" {error.response.status_code}"
+                message = f"FAILED: model request error ({detail})"
+                if not warned_model_error:
+                    print(f"Warning: {message}", file=sys.stderr)
+                    warned_model_error = True
             watched.claims(Claim(probe.action, message, probe.expected, context))
         if server is not None:
             server.fault = "ok"
@@ -168,18 +183,27 @@ def render(summary: dict[str, Any]) -> str:
 
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--provider", choices=["scripted", "anthropic", "openai"], default="scripted")
+    parser.add_argument("--provider", choices=["scripted", "anthropic", "openai", "openai-responses"], default="scripted")
     parser.add_argument("--model", default="")
     parser.add_argument("--base-url", default="https://api.openai.com/v1", help="for --provider openai or compatible servers")
+    parser.add_argument("--reasoning-effort", default="", help="openai only; gpt-6-luna needs 'none' for tools on chat/completions")
+    parser.add_argument("--no-store", action="store_true", help="disable response storage for --provider openai-responses")
     parser.add_argument("--runs", type=int, default=100)
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--fhir-url", default="", help="real FHIR R4 base URL; default is the in-memory mock")
     parser.add_argument("--inject-faults", type=float, default=0.0, help="share of runs with a mock-server write fault")
     parser.add_argument("--settle-attempts", type=int, default=1)
     parser.add_argument("--keep-values", action="store_true", help="store field values in the log (synthetic data only)")
-    parser.add_argument("--log", type=Path, default=Path(tempfile.gettempdir()) / "readback_eval.jsonl")
+    parser.add_argument("--log", type=Path, default=None, help="evidence log path; must not exist yet (default: fresh temp file)")
     parser.add_argument("--out", type=Path, help="also write the summary as JSON")
     args = parser.parse_args(argv)
+    if args.no_store and args.provider != "openai-responses":
+        parser.error("--no-store only applies to --provider openai-responses")
+    if args.log is None:
+        handle, name = tempfile.mkstemp(prefix="readback_eval_", suffix=".jsonl")
+        os.close(handle)
+        args.log = Path(name)
+        args.log.unlink()  # mkstemp reserved a unique name; run() requires it not to exist yet
     summary = run(args)
     print(render(summary))
     if args.out:

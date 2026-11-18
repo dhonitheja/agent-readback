@@ -71,20 +71,23 @@ class FhirAppointmentVerifier:
         url: str | None = "Appointment"
         params: dict[str, Any] | None = {"patient": patient, "_count": 200}
         for _ in range(MAX_PAGES):
-            response = self.client.get(url, params=params)
+            # HAPI can reuse a pre-write search bundle for the same query.
+            response = self.client.get(url, params=params, headers={"Cache-Control": "no-cache"})
             response.raise_for_status()
             bundle = response.json()
             for entry in bundle.get("entry", []):
                 flat = flatten_appointment(entry["resource"])
-                found[flat["id"]] = flat
+                found[flat["id"] or f"<no-id>#{len(found)}"] = flat  # keep id-less entries distinct
             url = next((l["url"] for l in bundle.get("link", []) if l.get("relation") == "next"), None)
             params = None
             if not url:
                 break
+        else:
+            raise ValueError("FHIR pagination limit reached before all appointments were read")
         return found
 
     def _one(self, appointment_id: str) -> dict[str, Any] | None:
-        response = self.client.get(f"Appointment/{appointment_id}")
+        response = self.client.get(f"Appointment/{appointment_id}", headers={"Cache-Control": "no-cache"})
         if response.status_code in (404, 410):
             return None
         response.raise_for_status()
