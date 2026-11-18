@@ -10,6 +10,7 @@ dependencies = ["httpx>=0.27"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]
+stripe-test = ["stripe>=17,<18", "mcp>=1.26,<2"]
 
 [project.scripts]
 readback = "agent_readback.cli:main"

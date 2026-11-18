@@ -145,3 +145,15 @@ def test_webhook_fires_only_for_problems_and_carries_no_values():
         pass
     assert len(sent) == 1 and sent[0]["status"] == "failed"
     assert "pi_1" not in json.dumps(sent[0]) and "2500" not in json.dumps(sent[0])
+
+
+def test_stripe_snapshot_fails_closed_if_pagination_repeats():
+    cursors = []
+
+    def handle(request):
+        cursors.append(request.url.params.get("starting_after"))
+        return httpx.Response(200, json={"data": [{"id": "re_1"}], "has_more": True})
+
+    with httpx.Client(transport=httpx.MockTransport(handle), base_url="https://stripe.test") as client:
+        assert StripeRefundVerifier(client).snapshot(REFUND) is None
+    assert cursors == [None, "re_1"]

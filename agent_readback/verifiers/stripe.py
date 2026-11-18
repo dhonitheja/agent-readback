@@ -31,15 +31,28 @@ class StripeRefundVerifier:
     def _refunds(self, payment_intent: str) -> dict[str, dict[str, Any]]:
         found: dict[str, dict[str, Any]] = {}
         params: dict[str, Any] = {"payment_intent": payment_intent, "limit": 100}
+        cursors: set[str] = set()
         while True:
             response = self.client.get("/v1/refunds", params=params)
             response.raise_for_status()
             page = response.json()
-            for item in page.get("data", []):
+            if not isinstance(page, dict):
+                raise ValueError("invalid Stripe refund page")
+            items = page.get("data")
+            has_more = page.get("has_more")
+            if not isinstance(items, list) or not isinstance(has_more, bool):
+                raise ValueError("invalid Stripe refund page")
+            for item in items:
+                if not isinstance(item, dict) or not isinstance(item.get("id"), str) or not item["id"]:
+                    raise ValueError("invalid Stripe refund")
                 found[item["id"]] = {name: item.get(name) for name in FIELDS}
-            if not page.get("has_more") or not page.get("data"):
+            if not has_more:
                 return found
-            params["starting_after"] = page["data"][-1]["id"]
+            if not items or items[-1]["id"] in cursors:
+                raise ValueError("Stripe refund pagination did not advance")
+            cursor = items[-1]["id"]
+            cursors.add(cursor)
+            params["starting_after"] = cursor
 
     def snapshot(self, claim: Claim) -> set[str] | None:
         try:

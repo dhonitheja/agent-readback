@@ -4,3 +4,7 @@ __pycache__/
 *.jsonl
 .env
 results*.json
+
+.env.*
+!.env.example
+.venv/
