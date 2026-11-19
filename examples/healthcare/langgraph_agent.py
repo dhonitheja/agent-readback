@@ -25,7 +25,9 @@ Requires the extras: pip install -e ".[langgraph]"
 from __future__ import annotations
 
 import argparse
+import functools
 import random
+import threading
 import tempfile
 from collections import Counter
 from pathlib import Path
@@ -39,7 +41,7 @@ from langgraph.graph import START, StateGraph
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode, tools_condition
 
-from agent_readback import Claim, EvidenceLog, Status, Verdict, watched
+from agent_readback import Claim, EvidenceLog, Status, Verdict, watch, watched
 from agent_readback.verifiers import FhirAppointmentVerifier
 
 from .mock_fhir import FAULTS, MockFhirServer
@@ -95,12 +97,26 @@ def build_tools(
     raw = make_tools(agent_client)
     makers = claim_makers(verifier_client)
     verifier = FhirAppointmentVerifier(verifier_client)
+    # ToolNode runs a reply's tool calls in parallel threads. Two overlapping
+    # snapshot/write/read-back windows for one patient would each report the
+    # other's write as an extra effect, so each whole cycle runs under one lock.
+    # ponytail: one global lock serializes all writes; per-patient locks if throughput matters.
+    lock = threading.Lock()
+
+    def serialized(fn: Callable[..., Any]) -> Callable[..., Any]:
+        @functools.wraps(fn)
+        def call(*args: Any, **kwargs: Any) -> Any:
+            with lock:
+                return fn(*args, **kwargs)
+
+        return call
+
     tools = []
     for schema in TOOL_SCHEMAS:
         name = schema["name"]
         fn = raw[name]
         if name in makers:  # reads (list_appointments) need no check
-            fn = watched(fn, verifier, makers[name], log, on_verdict=on_verdict)
+            fn = serialized(watched(fn, verifier, makers[name], log, on_verdict=on_verdict))
         tools.append(StructuredTool.from_function(func=fn, name=name, description=schema["description"]))
     return tools
 
@@ -164,8 +180,14 @@ def build_graph(agent: Callable[[State], dict[str, Any]], tools: list[Structured
     return graph.compile()
 
 
-def outcome(reply: str, verdicts: list[Verdict]) -> str:
-    """One label per run, from the agent's reply and the verdicts of its writes."""
+def outcome(reply: str, verdicts: list[Verdict], task: Verdict | None = None) -> str:
+    """One label per run, from the agent's reply, the verdicts of its writes and,
+    when given, the task-level verdict.
+
+    Per-write checks compare each write with the model's own arguments, so a
+    model that books the wrong time passes them. The task verdict compares the
+    record with what was actually requested and has the final word on DONE.
+    """
     head = reply.strip().upper()
     if not head.startswith(("DONE", "FAILED")):
         return "unclear_reply"  # the model ignored the DONE:/FAILED: contract; not counted either way
@@ -173,6 +195,10 @@ def outcome(reply: str, verdicts: list[Verdict]) -> str:
     said = "done" if said_done else "failed"
     if not verdicts:
         return f"said_{said}_no_write"  # e.g. DONE without ever calling a write tool
+    if said_done and task is not None and task.status is Status.FAILED:
+        return "false_completion_caught"  # e.g. every write held, but at the wrong time
+    if said_done and task is not None and task.status is Status.UNVERIFIED:
+        return "said_done_unverified"
     statuses = {v.status for v in verdicts}
     if said_done and verdicts[-1].status is Status.VERIFIED and Status.FAILED in statuses:
         # The last write held, but an earlier one failed and may have left an effect behind.
@@ -192,6 +218,7 @@ def run(
     setup = server.client()
     patients, practitioners = seed_people(setup)
     log = EvidenceLog(log_path)
+    task_verifier = FhirAppointmentVerifier(server.client())
     verdicts: list[Verdict] = []
     # The agent and the verifier get separate clients; in production, separate credentials.
     tools = build_tools(server.client(), server.client(), log, [verdicts.append])
@@ -200,8 +227,8 @@ def run(
     outcomes: Counter[str] = Counter()
     for index in range(runs):
         if real_agent is not None:
-            prompt = make_task(rng, index, setup, patients, practitioners).prompt  # setup writes fault-free
-            app = real_agent
+            task = make_task(rng, index, setup, patients, practitioners)  # setup writes fault-free
+            prompt, probe, app = task.prompt, task.probe, real_agent
         else:
             start = slot(index)
             request = {
@@ -209,14 +236,20 @@ def run(
                 "start": utc(start), "end": utc(start + VISIT),
             }
             prompt, app = f"Book {request}", build_graph(scripted_agent(request), tools)
+            probe = Claim("fhir.appointment.create", "", {**request, "status": "booked"})
+        context = {"run": index, "check": "task"}
+        probe = Claim(probe.action, "", probe.expected, context)
         server.fault = rng.choice(WRITE_FAULTS) if rng.random() < inject_faults else "ok"
         seen = len(verdicts)
-        try:  # recursion_limit bounds a model that loops on tool calls
-            reply = text_of(app.invoke({"messages": [HumanMessage(content=prompt)]}, {"recursion_limit": 12})["messages"][-1])
-        except GraphRecursionError:
-            reply = "FAILED: agent hit the step limit"
+        # Task-level check: was the request itself done, whatever tools the agent chose?
+        with watch(task_verifier, probe, log) as task_check:
+            try:  # recursion_limit bounds a model that loops on tool calls
+                reply = text_of(app.invoke({"messages": [HumanMessage(content=prompt)]}, {"recursion_limit": 12})["messages"][-1])
+            except GraphRecursionError:
+                reply = "FAILED: agent hit the step limit"
+            task_check.claims(Claim(probe.action, reply, probe.expected, context))
         server.fault = "ok"
-        outcomes[outcome(reply, verdicts[seen:])] += 1
+        outcomes[outcome(reply, verdicts[seen:], task_check.verdict)] += 1
 
     intact, _ = log.verify_chain()
     return {"runs": runs, "outcomes": dict(outcomes), "evidence_log": str(log_path), "chain_intact": intact}

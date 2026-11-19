@@ -1,3 +1,4 @@
+import pytest
 import json
 
 from agent_readback import Claim, EvidenceLog, Finding, FindingKind, Status, Verdict
@@ -247,3 +248,53 @@ def test_log_uses_lf_line_endings_on_every_platform(tmp_path):
     log.append(verdict(2))
     data = path.read_bytes()
     assert b"\r\n" not in data and data.count(b"\n") == 2
+
+
+def test_non_ascii_hash_reports_broken_not_a_traceback(tmp_path, capsys):
+    from agent_readback.evidence import GENESIS
+
+    path = tmp_path / "log.jsonl"
+    path.write_text(json.dumps({"seq": 0, "prev": GENESIS, "body": {}, "hash": "\u00e9"}) + "\n", encoding="utf-8")
+    for command in ("verify-log", "report"):
+        assert main([command, str(path)]) == 1
+    assert "Traceback" not in capsys.readouterr().err
+
+
+def test_dashboard_refuses_a_hard_link_to_the_log(tmp_path):
+    import os
+
+    path = tmp_path / "log.jsonl"
+    EvidenceLog(path).append(verdict(1))
+    before = path.read_bytes()
+    link = tmp_path / "report.html"
+    os.link(path, link)
+    assert main(["dashboard", str(path), "-o", str(link)]) == 3
+    assert path.read_bytes() == before
+
+
+def test_dashboard_refuses_a_symlink_to_any_log(tmp_path):
+    import os
+
+    path = tmp_path / "log.jsonl"
+    EvidenceLog(path).append(verdict(1))
+    archive = tmp_path / "archive.jsonl"
+    archive.write_text("archived evidence")
+    link = tmp_path / "report.html"
+    try:
+        os.symlink(archive, link)
+    except OSError:
+        pytest.skip("symlinks need extra privileges on this system")
+    assert main(["dashboard", str(path), "-o", str(link)]) == 3
+    assert archive.read_text() == "archived evidence"
+
+
+def test_parallel_appends_keep_the_chain_intact(tmp_path):
+    import threading
+
+    log = EvidenceLog(tmp_path / "log.jsonl")
+    threads = [threading.Thread(target=log.append, args=(verdict(n),)) for n in range(40)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert len(log.records()) == 40 and log.verify_chain() == (True, None)

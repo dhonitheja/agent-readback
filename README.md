@@ -37,7 +37,7 @@ flowchart LR
 
 ## What is tested and what is not
 
-Version 0.2.1. All 104 offline tests pass with the optional test dependencies
+Version 0.2.1. All 114 offline tests pass with the optional test dependencies
 installed. A separate public HAPI FHIR R4
 sandbox run verified 10 scripted operations (6 bookings, 1 reschedule,
 3 cancellations); this is a compatibility smoke test, not production validation.
@@ -149,20 +149,23 @@ graph.add_node("book", watched(book_node, verifier, lambda s: to_claim("book_app
 ```
 
 A complete LangGraph agent (agent node + `ToolNode` loop, every write tool
-wrapped, no API key needed) is in `examples/healthcare/langgraph_agent.py`:
+wrapped, plus a task-level check of what was actually requested) is in
+`examples/healthcare/langgraph_agent.py`. It needs the `langgraph` extra:
 
 ```bash
-python -m examples.healthcare.langgraph_agent --runs 20 --inject-faults 0.3
+python -m venv .venv
+source .venv/bin/activate          # Windows: .venv\Scripts\activate, or source .venv/Scripts/activate in Git Bash
+python -m pip install -e ".[dev,langgraph]"
+python -m examples.healthcare.langgraph_agent --runs 20 --inject-faults 0.3   # scripted agent, no API key
 ```
 
 With a real model through `langchain-anthropic` or `langchain-openai` (keys from
 the environment or `.env`; the model gets book, reschedule and cancel requests
-in Central time and picks its own tool calls):
+in Central time and picks its own tool calls), in the same activated venv:
 
 ```bash
-python -m venv .venv && .venv/Scripts/python -m pip install -e ".[dev,langgraph]"   # .venv/bin/python on macOS/Linux
-.venv/Scripts/python -m examples.healthcare.langgraph_agent --provider anthropic --model claude-haiku-5-5 --runs 10
-.venv/Scripts/python -m examples.healthcare.langgraph_agent --provider openai --model gpt-6-luna --runs 10
+python -m examples.healthcare.langgraph_agent --provider anthropic --model claude-haiku-5-5 --runs 10
+python -m examples.healthcare.langgraph_agent --provider openai --model gpt-6-luna --runs 10
 ```
 
 A 3-run smoke test with each model (2026-11-19, 30% injected faults) gave
@@ -236,7 +239,7 @@ restricted key with `refunds: read`, a database role with `SELECT` only).
 | Newest records dropped | Not detectable from the file; anchor the head hash externally (see above) |
 | Personal data in the log | Redacted by default: no observed values, no agent text (keyed digest only), expected values replaced unless named in `keep_fields` |
 | Alert spoofing | `WebhookAlert` signs every body with `X-Readback-Signature: sha256=<HMAC>` when `READBACK_ALERT_KEY` is set; receivers must check it |
-| Alert receiver forging the log | The alert key is separate from `READBACK_LOG_KEY` and the log key is never used for alerts; `WebhookAlert` refuses an alert key equal to the log key |
+| Alert receiver forging the log | The alert key is separate from `READBACK_LOG_KEY` and the log key is never used for alerts. `WebhookAlert` refuses a key equal to `READBACK_LOG_KEY` or to a key passed to any `EvidenceLog` in the same process, at creation and before each send. It cannot see keys used only by other processes: keep explicit log and alert keys separate yourself |
 | Server-supplied paging link sends the verifier's token elsewhere | Each FHIR next link is resolved the way httpx will send it (so `//host/x` and similar forms count) and must stay on the client's scheme, host and port; anything else is `unverified` and is never requested |
 | Evidence log overwritten by the dashboard | `readback dashboard` refuses an output path that is the log itself or any existing `.jsonl` |
 | Hostile or broken server pages forever | FHIR and Stripe reads are page-capped; the result is `unverified`, not a hang |

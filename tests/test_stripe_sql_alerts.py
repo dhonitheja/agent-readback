@@ -242,3 +242,27 @@ def test_alert_key_equal_to_the_log_key_is_refused(monkeypatch):
         WebhookAlert("https://hooks.test/x", key=b"same")
     monkeypatch.setenv("READBACK_ALERT_KEY", "different")
     assert WebhookAlert("https://hooks.test/x").key == b"different"
+
+
+def test_alert_key_equal_to_an_explicit_log_key_is_refused(monkeypatch, tmp_path):
+    from agent_readback import EvidenceLog
+
+    monkeypatch.delenv("READBACK_LOG_KEY", raising=False)
+    monkeypatch.delenv("READBACK_ALERT_KEY", raising=False)
+    EvidenceLog(tmp_path / "e.jsonl", key="explicit-shared")
+    with pytest.raises(ValueError, match="must differ"):
+        WebhookAlert("https://hooks.test/x", key="explicit-shared")
+
+
+def test_alert_created_before_the_log_takes_its_key_is_not_sent(monkeypatch, tmp_path):
+    from agent_readback import EvidenceLog
+
+    monkeypatch.delenv("READBACK_LOG_KEY", raising=False)
+    sent = []
+    client = httpx.Client(transport=httpx.MockTransport(lambda r: sent.append(r) or httpx.Response(200)))
+    alert = WebhookAlert("https://hooks.test/x", client, key="late-shared")
+    EvidenceLog(tmp_path / "e.jsonl", key="late-shared")
+    stripe = MockStripe()
+    with watch(StripeRefundVerifier(stripe.client()), REFUND, on_verdict=[alert]):
+        pass
+    assert sent == [] and "evidence-log key" in str(alert.last_error)

@@ -11,10 +11,11 @@ Readback (`agent-readback`, v0.2.1): checks an AI agent's "Done." claim against 
 Run everything from this directory (the repo root): tests import `examples.healthcare.*` as a top-level package.
 
 ```bash
-pip install -e ".[dev]"
-python -m venv .venv && .venv/Scripts/python -m pip install -e ".[dev,langgraph]" "mcp<2"   # isolated env; tests target MCP 1.x
-pytest                                             # full suite (in-memory mocks, no network)
-pytest tests/test_fhir_verifier.py::test_duplicate_booking_is_an_extra_effect   # single test
+python -m venv .venv                               # isolated env (recommended)
+source .venv/bin/activate                          # macOS/Linux; Windows: .venv\Scripts\activate (cmd/PowerShell) or source .venv/Scripts/activate (Git Bash)
+python -m pip install -e ".[dev,langgraph]" mcp    # optional extras enable the MCP and LangGraph tests (MCP 1.x and 2.x both work)
+python -m pytest                                   # full suite (in-memory mocks, no network)
+python -m pytest tests/test_fhir_verifier.py::test_duplicate_booking_is_an_extra_effect   # single test
 python -m examples.healthcare.run_eval --provider scripted --runs 200 --inject-faults 0.2
 export READBACK_LOG_KEY=...                        # key the log was written with; omit only for unkeyed logs
 readback verify-log evidence.jsonl                 # chain check, prints head hash (0 ok, 1 broken/untrustworthy, 2 bad args, 3 file error; --require-key for audits)
@@ -39,5 +40,5 @@ python -m build                                    # wheel + sdist into dist/
 - All HTTP goes through an injected `httpx.Client`; tests swap in `httpx.MockTransport`. Keep new verifiers and providers injectable the same way.
 - New verifier: implement `snapshot`/`check` per `core.Verifier`, name actions `<system>.<resource>.<verb>`, export from `verifiers/__init__.py`, update the README verifier table.
 - The verifier must use credentials the agent doesn't hold; a shared write path makes the check meaningless.
-- The README's "What is tested and what is not" and "Security model" tables are kept honest. Update them (and the test count, currently 104) when coverage or guarantees change.
+- The README's "What is tested and what is not" and "Security model" tables are kept honest. Update them (and the test count, currently 114) when coverage or guarantees change.
 - Security changes need a test that demonstrates the attack failing (see `test_keyed_log_detects_a_chain_forged_without_the_key`), not just the happy path.

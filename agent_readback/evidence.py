@@ -29,6 +29,8 @@ import hashlib
 import hmac
 import json
 import os
+import re
+import threading
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -38,6 +40,22 @@ GENESIS = "0" * 64
 REDACTED = "[redacted]"
 KEY_ENV = "READBACK_LOG_KEY"
 MAC_ALG = "hmac-sha256"
+_HEX64 = re.compile(r"^[0-9a-f]{64}$")
+
+# Fingerprints of every key an EvidenceLog in this process has used, so that
+# WebhookAlert can refuse to sign with one (CodeRabbit #1). Per-process only:
+# keys used by other processes are not visible here.
+_LOG_KEY_FINGERPRINTS: set[str] = set()
+
+
+def _fingerprint(key: bytes) -> str:
+    return hashlib.sha256(b"readback-log-key:" + key).hexdigest()
+
+
+def is_log_key(key: bytes) -> bool:
+    """True if `key` is READBACK_LOG_KEY or a key an EvidenceLog in this process uses."""
+    env = os.environ.get(KEY_ENV, "").encode()
+    return bool(key) and ((bool(env) and hmac.compare_digest(key, env)) or _fingerprint(key) in _LOG_KEY_FINGERPRINTS)
 
 
 def _key_from(key: bytes | str | None) -> bytes | None:
@@ -92,6 +110,9 @@ class EvidenceLog:
         self.keep_all = keep_fields == "*"
         self.keep = frozenset() if self.keep_all else frozenset(keep_fields)
         self.key = _key_from(key)
+        if self.key:
+            _LOG_KEY_FINGERPRINTS.add(_fingerprint(self.key))
+        self._lock = threading.Lock()  # parallel tool calls (e.g. LangGraph ToolNode) share one log
         self._last = GENESIS
         self._count = 0
         for record in self.records():
@@ -104,6 +125,10 @@ class EvidenceLog:
         return self._last
 
     def append(self, verdict: Verdict) -> str:
+        with self._lock:  # seq, prev and the file write must happen as one step
+            return self._append(verdict)
+
+    def _append(self, verdict: Verdict) -> str:
         body = verdict.to_dict()
         if not self.keep_all:
             body = redact(body, self.keep, self.key)
@@ -136,8 +161,11 @@ class EvidenceLog:
                     raise ValueError("not a JSON object")
                 if not all(k in record for k in ("seq", "prev", "body", "hash")):
                     raise ValueError("missing fields")
-                if not isinstance(record["body"], dict) or not isinstance(record["hash"], str):
-                    raise ValueError("body must be an object and hash a string")
+                if not isinstance(record["body"], dict):
+                    raise ValueError("body must be an object")
+                for name in ("hash", "prev"):  # compare_digest rejects non-ASCII strings with a TypeError
+                    if not isinstance(record[name], str) or not _HEX64.match(record[name]):
+                        raise ValueError(f"{name} must be 64 lowercase hex characters")
             except ValueError as error:
                 raise ValueError(f"line {number + 1} of {self.path} is not an evidence record: {error}") from None
             out.append(record)

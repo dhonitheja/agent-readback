@@ -9,7 +9,7 @@ from langgraph.prebuilt import ToolNode  # noqa: E402
 from agent_readback import EvidenceLog, Status  # noqa: E402
 from examples.healthcare.langgraph_agent import build_tools, run  # noqa: E402
 
-from .conftest import DOCTOR, END, PATIENT, START  # noqa: E402
+from .conftest import DOCTOR, END, LATER, LATER_END, PATIENT, START  # noqa: E402
 from .test_adapters import in_graph  # noqa: E402
 
 
@@ -112,3 +112,30 @@ def test_outcome_labels_unclear_replies_and_retries():
     assert outcome("DONE: booked", [ok, bad]) == "false_completion_caught"
     assert outcome("done: booked", [ok]) == "done_and_verified"
     assert text_of(AIMessage(content=["DONE:", {"type": "text", "text": "booked"}])) == "DONE: booked"
+
+
+def test_parallel_tool_calls_for_one_patient_are_both_verified(server, tmp_path):
+    log = EvidenceLog(tmp_path / "e.jsonl")
+    verdicts = []
+    node = in_graph(ToolNode(build_tools(server.client(), server.client(), log, [verdicts.append])))
+    calls = [
+        {"name": "book_appointment", "args": {"patient": PATIENT, "practitioner": DOCTOR, "start": START, "end": END}, "id": "b1"},
+        {"name": "book_appointment", "args": {"patient": PATIENT, "practitioner": DOCTOR, "start": LATER, "end": LATER_END}, "id": "b2"},
+    ]
+    node.invoke({"messages": [AIMessage(content="", tool_calls=calls)]})
+    assert [v.status for v in verdicts] == [Status.VERIFIED, Status.VERIFIED]
+    assert log.verify_chain() == (True, None) and len(log.records()) == 2
+
+
+def test_wrong_time_booking_with_done_is_caught_by_the_task_check(tmp_path):
+    def book_wrong_time(messages):
+        prompt = messages[-1].content
+        patient = next(w.strip(".,") for w in prompt.split() if w.startswith("Patient/"))
+        practitioner = next((w.strip(".,") for w in prompt.split() if w.startswith("Practitioner/")), DOCTOR)
+        args = {"patient": patient, "practitioner": practitioner, "start": "2030-01-01T00:00:00+00:00", "end": "2030-01-01T00:30:00+00:00"}
+        return AIMessage(content="", tool_calls=[{"name": "book_appointment", "args": args, "id": "b1"}])
+
+    chat = FakeChat([book_wrong_time, lambda m: AIMessage(content="DONE: booked.")])
+    summary = run(runs=1, inject_faults=0.0, seed=0, log_path=tmp_path / "e.jsonl", chat=chat)
+    # the write itself verifies against the model's own arguments; the task check does not
+    assert summary["outcomes"] == {"false_completion_caught": 1} and summary["chain_intact"]

@@ -48,5 +48,5 @@ infrastructure from the maintainer. Step 12 needs outside reviewers.
   UNKEYED flagging and `--require-key`, dashboard overwrite guard, malformed
   record handling, LF log endings, LangGraph example agent with Anthropic and
   OpenAI models, `tzdata` on Windows.
-- Verified locally: 104 tests pass on MCP 1.30 and on MCP 2.3, both with
-  LangGraph 1.2.
+- Verified locally: 114 tests pass on MCP 1.30 and on MCP 2.3, both with
+  LangGraph 1.2 (1 symlink test skips on Windows without symlink privileges).

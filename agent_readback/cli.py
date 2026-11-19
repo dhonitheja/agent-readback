@@ -78,10 +78,11 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "dashboard":
         out = Path(args.out)
-        if out.exists() and (out.resolve() == path.resolve() or out.suffix.lower() == ".jsonl"):
-            print(f"ERROR: refusing to overwrite {args.out}; an evidence log is never overwritten", file=sys.stderr)
-            return FILE_ERROR
         try:
+            # samefile catches hard links to the log; the resolved suffix catches symlinks to any log.
+            if out.exists() and (out.samefile(path) or out.suffix.lower() == ".jsonl" or out.resolve().suffix.lower() == ".jsonl"):
+                print(f"ERROR: refusing to overwrite {args.out}; an evidence log is never overwritten", file=sys.stderr)
+                return FILE_ERROR
             out.write_text(page, encoding="utf-8")
         except OSError as error:
             print(f"ERROR: cannot write {args.out}: {error}", file=sys.stderr)

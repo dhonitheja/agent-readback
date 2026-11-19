@@ -251,3 +251,15 @@ def test_root_relative_next_link_is_not_appended_to_the_base_path():
     with httpx.Client(transport=httpx.MockTransport(handle), base_url="https://fhir.test/r4/") as client:
         assert FhirAppointmentVerifier(client).snapshot(create_claim()) == set()
     assert paths == ["/r4/Appointment", "/r4/Appointment"]
+
+
+@pytest.mark.parametrize("link", ["/Appointment?page=2#next", "https://fhir.test/Appointment?page=2#frag", "https://[bad"])
+def test_odd_next_links_never_crash_the_snapshot(link):
+    def handle(request):
+        if request.url.params.get("page") == "2":
+            return httpx.Response(200, json={"entry": []})
+        return httpx.Response(200, json={"entry": [], "link": [{"relation": "next", "url": link}]})
+
+    with httpx.Client(transport=httpx.MockTransport(handle), base_url="https://fhir.test") as client:
+        result = FhirAppointmentVerifier(client).snapshot(create_claim())
+    assert result in (set(), None)  # followed, or refused as unverified; never an exception
