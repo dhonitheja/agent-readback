@@ -37,6 +37,7 @@ from .core import Verdict
 GENESIS = "0" * 64
 REDACTED = "[redacted]"
 KEY_ENV = "READBACK_LOG_KEY"
+MAC_ALG = "hmac-sha256"
 
 
 def _key_from(key: bytes | str | None) -> bytes | None:
@@ -109,8 +110,13 @@ class EvidenceLog:
         body = json.loads(json.dumps(body, default=str))  # store exactly what will be re-read
         seq = self._count
         record = {"seq": seq, "prev": self._last, "body": body, "hash": _digest(self._last, seq, body, self.key)}
+        if self.key is not None:
+            # Informational, not hashed: lets a verifier without the key say "keyed log"
+            # instead of "edited". A forger can delete it, so the CLI also flags every
+            # keyless verification as not forgery-proof.
+            record["mac"] = MAC_ALG
         fd = os.open(self.path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
-        with os.fdopen(fd, "a", encoding="utf-8") as handle:
+        with os.fdopen(fd, "a", encoding="utf-8", newline="\n") as handle:  # same bytes on every OS
             handle.write(json.dumps(record) + "\n")
         self._last = record["hash"]
         self._count += 1
@@ -126,8 +132,12 @@ class EvidenceLog:
                 continue
             try:
                 record = json.loads(line)
+                if not isinstance(record, dict):
+                    raise ValueError("not a JSON object")
                 if not all(k in record for k in ("seq", "prev", "body", "hash")):
                     raise ValueError("missing fields")
+                if not isinstance(record["body"], dict) or not isinstance(record["hash"], str):
+                    raise ValueError("body must be an object and hash a string")
             except ValueError as error:
                 raise ValueError(f"line {number + 1} of {self.path} is not an evidence record: {error}") from None
             out.append(record)
@@ -138,10 +148,15 @@ class EvidenceLog:
         prev = GENESIS
         for index, record in enumerate(self.records()):
             if (
-                record["seq"] != index
+                type(record["seq"]) is not int  # `True == 1` must not pass as seq 1
+                or record["seq"] != index
                 or record["prev"] != prev
                 or not hmac.compare_digest(record["hash"], _digest(prev, index, record["body"], self.key))
             ):
                 return False, index
             prev = record["hash"]
         return True, None
+
+    def needs_key(self) -> bool:
+        """True if records say they were written with a key that this log does not have."""
+        return self.key is None and any(record.get("mac") == MAC_ALG for record in self.records())

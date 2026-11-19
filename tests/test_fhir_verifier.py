@@ -184,3 +184,70 @@ def test_resources_without_an_id_are_not_collapsed():
     from agent_readback.verifiers.fhir import flatten_appointment
 
     assert flatten_appointment({"status": "booked"})["id"] is None
+
+
+def test_foreign_next_link_never_receives_the_read_only_token():
+    hosts = []
+
+    def handle(request):
+        hosts.append((request.url.host, request.headers.get("Authorization")))
+        return httpx.Response(200, json={
+            "entry": [],
+            "link": [{"relation": "next", "url": "https://attacker.test/steal?page=2"}],
+        })
+
+    headers = {"Authorization": "Bearer READ-ONLY"}
+    with httpx.Client(transport=httpx.MockTransport(handle), base_url="https://fhir.test", headers=headers) as client:
+        verifier = FhirAppointmentVerifier(client)
+        assert verifier.snapshot(create_claim()) is None
+        assert verifier.check(create_claim(), set()).status is Status.UNVERIFIED
+    assert hosts and all(host == "fhir.test" for host, _ in hosts)
+
+
+def test_absolute_next_link_on_the_same_server_is_followed():
+    pages = []
+
+    def handle(request):
+        pages.append(str(request.url))
+        if "page=2" in str(request.url):
+            return httpx.Response(200, json={"entry": []})
+        return httpx.Response(200, json={
+            "entry": [],
+            "link": [{"relation": "next", "url": "https://fhir.test/Appointment?page=2"}],
+        })
+
+    with httpx.Client(transport=httpx.MockTransport(handle), base_url="https://fhir.test") as client:
+        assert FhirAppointmentVerifier(client).snapshot(create_claim()) == set()
+    assert len(pages) == 2
+
+
+@pytest.mark.parametrize("link", ["//attacker.test/steal", "https:attacker.test/steal", "http://fhir.test/Appointment", "https://fhir.test:8443/x"])
+def test_odd_next_links_are_judged_by_where_httpx_sends_them(link):
+    hosts = []
+
+    def handle(request):
+        hosts.append(str(request.url))
+        return httpx.Response(200, json={"entry": [], "link": [{"relation": "next", "url": link}]})
+
+    with httpx.Client(transport=httpx.MockTransport(handle), base_url="https://fhir.test") as client:
+        verifier = FhirAppointmentVerifier(client)
+        target = client.build_request("GET", link).url
+        verifier.snapshot(create_claim())
+    off_origin = (target.scheme, target.host, target.port) != ("https", "fhir.test", None)
+    assert all(h.startswith("https://fhir.test/") for h in hosts)
+    if off_origin:
+        assert len(hosts) == 1  # refused before the request was ever made
+
+
+def test_root_relative_next_link_is_not_appended_to_the_base_path():
+    paths = []
+
+    def handle(request):
+        paths.append(request.url.path)
+        if request.url.params.get("page") == "2":
+            return httpx.Response(200, json={"entry": []})
+        return httpx.Response(200, json={"entry": [], "link": [{"relation": "next", "url": "/r4/Appointment?page=2"}]})
+
+    with httpx.Client(transport=httpx.MockTransport(handle), base_url="https://fhir.test/r4/") as client:
+        assert FhirAppointmentVerifier(client).snapshot(create_claim()) == set()
+    assert paths == ["/r4/Appointment", "/r4/Appointment"]

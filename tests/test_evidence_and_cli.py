@@ -81,7 +81,7 @@ def test_report_and_cli(tmp_path, capsys):
 
 
 def test_cli_rejects_a_missing_file(tmp_path, capsys):
-    assert main(["verify-log", str(tmp_path / "nope.jsonl")]) == 2
+    assert main(["verify-log", str(tmp_path / "nope.jsonl")]) == 3
     assert "no such file" in capsys.readouterr().err
 
 
@@ -174,3 +174,76 @@ def test_dashboard_of_a_tampered_log_says_broken_and_exits_1(tmp_path):
 
     assert main(["dashboard", str(path), "-o", str(out)]) == 1
     assert "BROKEN" in out.read_text(encoding="utf-8")
+
+
+def test_forged_keyed_log_is_not_called_trustworthy_without_the_key(tmp_path, monkeypatch, capsys):
+    monkeypatch.delenv("READBACK_LOG_KEY", raising=False)
+    path = tmp_path / "keyed.jsonl"
+    log = EvidenceLog(path, key="s3cret")
+    log.append(verdict(1))
+    log.append(verdict(2))
+
+    # Honest keyed log, auditor forgot the key: a clear "needs key", not "edited", not OK.
+    assert main(["verify-log", str(path)]) == 1
+    assert "written with a key" in capsys.readouterr().err
+
+    # Forger rebuilds the chain unkeyed and drops the marker: OK is flagged UNKEYED...
+    records = [json.loads(line) for line in path.read_text().splitlines()]
+    for record in records:
+        record.pop("mac")
+    path.write_text("\n".join(json.dumps(r) for r in records) + "\n")
+    _rewrite_chain_without_key(path)
+    assert main(["verify-log", str(path)]) == 0
+    captured = capsys.readouterr()
+    assert "(UNKEYED)" in captured.out and "not forgery" in captured.err
+    # ...and an audit with --require-key refuses it outright.
+    assert main(["verify-log", "--require-key", str(path)]) == 1
+
+
+def test_dashboard_never_overwrites_the_evidence_log(tmp_path):
+    path = tmp_path / "log.jsonl"
+    EvidenceLog(path).append(verdict(1))
+    before = path.read_bytes()
+    assert main(["dashboard", str(path), "-o", str(path)]) == 3
+    other = tmp_path / "other.jsonl"
+    other.write_text("keep me")
+    assert main(["dashboard", str(path), "-o", str(other)]) == 3
+    assert path.read_bytes() == before and other.read_text() == "keep me"
+
+
+def test_malformed_records_report_broken_not_a_traceback(tmp_path, capsys):
+    path = tmp_path / "log.jsonl"
+    for bad in ('"seqprevbodyhash"', '[1, 2]', '{"seq": 0, "prev": "x", "body": {}, "hash": "y"}'):
+        path.write_text(bad + "\n")
+        for command in ("verify-log", "report"):
+            assert main([command, str(path)]) == 1, (bad, command)
+        assert main(["dashboard", str(path), "-o", str(tmp_path / "r.html")]) == 1, bad
+    assert "Traceback" not in capsys.readouterr().err
+
+
+def test_boolean_seq_does_not_pass_as_an_integer(tmp_path):
+    path = tmp_path / "log.jsonl"
+    log = EvidenceLog(path)
+    log.append(verdict(1))
+    log.append(verdict(2))
+    records = [json.loads(line) for line in path.read_text().splitlines()]
+    records[1]["seq"] = True
+    path.write_text("\n".join(json.dumps(r) for r in records) + "\n")
+    assert EvidenceLog(path).verify_chain() == (False, 1)
+
+
+def test_cli_file_errors_exit_3_without_a_traceback(tmp_path, capsys):
+    path = tmp_path / "log.jsonl"
+    EvidenceLog(path).append(verdict(1))
+    assert main(["verify-log", str(tmp_path)]) == 3  # a directory
+    assert main(["dashboard", str(path), "-o", str(tmp_path / "missing" / "r.html")]) == 3
+    assert "Traceback" not in capsys.readouterr().err
+
+
+def test_log_uses_lf_line_endings_on_every_platform(tmp_path):
+    path = tmp_path / "log.jsonl"
+    log = EvidenceLog(path)
+    log.append(verdict(1))
+    log.append(verdict(2))
+    data = path.read_bytes()
+    assert b"\r\n" not in data and data.count(b"\n") == 2
