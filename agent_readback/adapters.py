@@ -34,7 +34,10 @@ def mcp_text(result: Any) -> str:
     """The text an MCP `CallToolResult` returned, used as the agent's claim message."""
     parts = [getattr(block, "text", None) for block in getattr(result, "content", None) or ()]
     text = " ".join(part for part in parts if part)
-    return f"ERROR: {text}" if getattr(result, "isError", False) else text
+    failed = getattr(result, "isError", None)  # mcp 1.x
+    if failed is None:
+        failed = getattr(result, "is_error", False)  # mcp 2.x renamed the field
+    return f"ERROR: {text}" if failed else text
 
 
 def watched(

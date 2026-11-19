@@ -106,12 +106,10 @@ def test_async_verifier_reads_run_off_loop_even_when_tool_raises(server, tools):
 
 def test_mcp_client_session_call_tool(server, tools):
     pytest.importorskip("mcp")
-    from mcp.server.fastmcp import FastMCP
-    from mcp.shared.memory import create_connected_server_and_client_session
-
     from agent_readback import mcp_text
+    from tests.mcp_compat import in_memory_session, server_class
 
-    app = FastMCP("scheduler")
+    app = server_class()("scheduler")
     app.tool()(tools["book_appointment"])
     verdicts = []
 
@@ -119,7 +117,7 @@ def test_mcp_client_session_call_tool(server, tools):
         return booking_claim(**arguments) if name == "book_appointment" else None
 
     async def scenario():
-        async with create_connected_server_and_client_session(app) as session:
+        async with in_memory_session(app) as session:
             session.call_tool = watched(
                 session.call_tool, FhirAppointmentVerifier(server.client()), to_claim, said=mcp_text, on_verdict=[verdicts.append]
             )
@@ -166,7 +164,7 @@ def test_mcp_stdio_tool_write_is_verified(tmp_path):
     # mcp is installed by this point: a hang is a real failure, never a skip.
     result = asyncio.run(scenario())
 
-    assert not result.isError
+    assert not getattr(result, "isError", getattr(result, "is_error", False))
     assert [v.status for v in verdicts] == [Status.VERIFIED]
     assert verdicts[0].claim.agent_said == "Booked."
 
@@ -214,10 +212,15 @@ def test_langgraph_tool_node_verifies_wrapped_tool(server, tools):
 
     verdicts = []
     book.func = watched(book.func, FhirAppointmentVerifier(server.client()), booking_claim, on_verdict=[verdicts.append])
-    node = in_graph(ToolNode([book]))
     message = AIMessage(content="", tool_calls=[{"name": book.name, "args": ARGS, "id": "call_1"}])
 
-    result = node.invoke({"messages": [message]})
+    # Newer langgraph needs a runtime config, which only a compiled graph supplies.
+    from langgraph.graph import START, MessagesState, StateGraph
+
+    graph = StateGraph(MessagesState)
+    graph.add_node("tools", ToolNode([book]))
+    graph.add_edge(START, "tools")
+    result = graph.compile().invoke({"messages": [message]})
 
     assert result["messages"][-1].tool_call_id == "call_1"
     assert [v.status for v in verdicts] == [Status.VERIFIED]
@@ -266,3 +269,15 @@ def test_object_with_async_call_is_checked_after_it_runs(server, tools):
     asyncio.run(book(**ARGS))
 
     assert [v.status for v in verdicts] == [Status.VERIFIED]
+
+
+def test_mcp_text_marks_error_results_under_both_field_names():
+    from types import SimpleNamespace
+
+    from agent_readback import mcp_text
+
+    block = SimpleNamespace(text="boom")
+    assert mcp_text(SimpleNamespace(content=[block], isError=True)) == "ERROR: boom"  # mcp 1.x
+    assert mcp_text(SimpleNamespace(content=[block], is_error=True)) == "ERROR: boom"  # mcp 2.x
+    assert mcp_text(SimpleNamespace(content=[block], isError=False)) == "boom"
+    assert mcp_text(SimpleNamespace(content=[block], is_error=False)) == "boom"

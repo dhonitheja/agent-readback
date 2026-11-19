@@ -4,9 +4,12 @@ import sqlite3
 import sys
 from contextlib import closing
 
-from mcp.server.fastmcp import FastMCP
+try:
+    from mcp.server.fastmcp import FastMCP as Server  # mcp 1.x
+except ImportError:
+    from mcp.server.mcpserver import MCPServer as Server  # mcp 2.x
 
-app = FastMCP("scheduler")
+app = Server("scheduler")
 
 
 @app.tool()
