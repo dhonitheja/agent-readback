@@ -26,7 +26,9 @@ def _tile(css: str, value: str, label: str) -> str:
     return f'<div class="tile {css}"><b>{escape(value)}</b><span>{escape(label)}</span></div>'
 
 
-def render_html(records: list[dict[str, Any]], chain_intact: bool, title: str = "Readback report") -> str:
+def render_html(
+    records: list[dict[str, Any]], chain_intact: bool, title: str = "Readback report", unkeyed: bool = False,
+) -> str:
     summary = summarise(records)
     tiles = "".join(
         [
@@ -57,7 +59,9 @@ def render_html(records: list[dict[str, Any]], chain_intact: bool, title: str = 
         )
         for body in problems
     ) or '<tr><td colspan="5">Every claim was verified.</td></tr>'
-    chain = "intact" if chain_intact else "BROKEN: a record was edited or deleted"
+    chain = "intact" if chain_intact else "BROKEN: a record was edited, deleted or reordered"
+    if unkeyed:
+        chain += " (UNKEYED: detects accidental damage, not forgery)"
     return f"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{escape(title)}</title><style>{STYLE}</style></head><body><main>

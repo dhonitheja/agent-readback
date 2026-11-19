@@ -37,7 +37,7 @@ flowchart LR
 
 ## What is tested and what is not
 
-Version 0.2.1. All 76 offline tests pass with the optional test dependencies
+Version 0.2.1. All 114 offline tests pass with the optional test dependencies
 installed. A separate public HAPI FHIR R4
 sandbox run verified 10 scripted operations (6 bookings, 1 reschedule,
 3 cancellations); this is a compatibility smoke test, not production validation.
@@ -47,12 +47,12 @@ create refunds.
 
 | Part | Tested against | Not yet tested against |
 |---|---|---|
-| FHIR appointment verifier (create, update, cancel) | in-memory mock, incomplete pagination, stale-search regression; public HAPI R4 sandbox smoke test | a production EHR, authenticated read-only isolation |
+| FHIR appointment verifier (create, update, cancel) | in-memory mock, incomplete pagination, stale-search regression, off-server next links; public HAPI R4 sandbox smoke test | a production EHR, authenticated read-only isolation |
 | Stripe refund verifier and sandbox runner | mock refunds endpoint; test-key guards; Stripe test mode with a read-only restricted key: success, missing, wrong-amount and duplicate scenarios | live mode, a refund left pending by the bank |
 | SQL row verifier | SQLite, including insert with concurrent deletion | Postgres or any other database |
 | Anthropic and OpenAI-compatible agent loops | Mock responses cover each API's message format, Responses tool-call chaining with and without storage, and a once-per-evaluation warning for a model HTTP 400. Earlier live Anthropic runs (claude-sonnet-5-5 and claude-haiku-5-5, 50 tasks each, 20% injected faults) caught every false completion and matched the scripted baseline run for run. On the same tasks and faults, gpt-6-luna with `--reasoning-effort none` caught all 13 injected faults plus 6 of its own wrong reschedule or cancel values. With `--provider openai-responses --reasoning-effort medium`, it caught all 13 and matched the scripted baseline run for run, both with server-side storage and with `--no-store` (OpenAI echoed `store: false`; encrypted reasoning was sent back each turn instead of `previous_response_id`). | Reasoning efforts other than `none` and `medium` |
 | Evidence log, redaction, report, dashboard, webhook | unit tests, including HTML escaping of hostile context values and a BROKEN dashboard for a tampered log | production load |
-| `watched()` adapters | Sync and async functions, including off-loop verifier reads when an async tool raises, a verdict even when an AnyIO cancel scope cancels the tool after it writes, and objects with `async def __call__`. MCP 1.27 `ClientSession` runs against in-memory FastMCP and a local stdio subprocess backed by SQLite. LangGraph 0.2 runs a wrapped `StateGraph` node and a wrapped LangChain tool in `ToolNode`. Mock FHIR tests catch injected drop, wrong-time, wrong-practitioner and duplicate faults. | MCP over HTTP and LangGraph 1.x |
+| `watched()` adapters | Sync and async functions, including off-loop verifier reads when an async tool raises, a verdict even when an AnyIO cancel scope cancels the tool after it writes, and objects with `async def __call__`. MCP 1.27 `ClientSession` runs against in-memory FastMCP and a local stdio subprocess backed by SQLite. LangGraph 0.2 and 1.2 run a wrapped `StateGraph` node and a wrapped LangChain tool in `ToolNode`, plus a full agent/`ToolNode` loop (`examples/healthcare/langgraph_agent.py`) that catches every false DONE under injected faults. Mock FHIR tests catch injected drop, wrong-time, wrong-practitioner and duplicate faults. | MCP over HTTP, MCP 2.x |
 
 No security or compliance review has been done.
 
@@ -148,6 +148,29 @@ session.call_tool = watched(session.call_tool, verifier, to_claim, log, said=mcp
 graph.add_node("book", watched(book_node, verifier, lambda s: to_claim("book_appointment", s["booking"]), log))
 ```
 
+A complete LangGraph agent (agent node + `ToolNode` loop, every write tool
+wrapped, plus a task-level check of what was actually requested) is in
+`examples/healthcare/langgraph_agent.py`. It needs the `langgraph` extra:
+
+```bash
+python -m venv .venv
+source .venv/bin/activate          # Windows: .venv\Scripts\activate, or source .venv/Scripts/activate in Git Bash
+python -m pip install -e ".[dev,langgraph]"
+python -m examples.healthcare.langgraph_agent --runs 20 --inject-faults 0.3   # scripted agent, no API key
+```
+
+With a real model through `langchain-anthropic` or `langchain-openai` (keys from
+the environment or `.env`; the model gets book, reschedule and cancel requests
+in Central time and picks its own tool calls), in the same activated venv:
+
+```bash
+python -m examples.healthcare.langgraph_agent --provider anthropic --model claude-haiku-5-5 --runs 10
+python -m examples.healthcare.langgraph_agent --provider openai --model gpt-6-luna --runs 10
+```
+
+A 3-run smoke test with each model (2026-11-19, 30% injected faults) gave
+2 verified and 1 false DONE caught per model. Too small to compare models.
+
 ## Verifiers
 
 | Verifier | Actions | Catches |
@@ -170,6 +193,8 @@ export READBACK_LOG_KEY=...          # same key the log was written with
 readback verify-log evidence.jsonl   # detects edited, deleted or reordered records; prints the head hash
 readback report evidence.jsonl       # verdict counts and failed rate by action
 readback dashboard evidence.jsonl -o report.html   # one-file HTML page; exits 1 if the chain is broken
+readback verify-log --require-key evidence.jsonl   # audits: fail unless READBACK_LOG_KEY is set
+# exit codes: 0 intact, 1 broken or untrustworthy, 2 bad arguments, 3 file error
 ```
 
 The dashboard shows the same redacted data as the log, with every value
@@ -210,10 +235,13 @@ restricted key with `refunds: read`, a database role with `SELECT` only).
 | Agent claims success, system disagrees | Independent read-back; verdict is deterministic, never from an LLM |
 | Agent crashes after writing | `watch` still checks and logs before the exception propagates |
 | Evidence record edited, deleted or reordered | Sequence number + hash chain; `verify-log` reports the first bad record |
-| Whole chain rewritten by someone with file access | HMAC-SHA256 with `READBACK_LOG_KEY`; a chain built without the key fails verification |
+| Whole chain rewritten by someone with file access | HMAC-SHA256 with `READBACK_LOG_KEY`; a chain built without the key fails verification. Without the key, an OK is labelled `UNKEYED` (not forgery-proof); `--require-key` makes audits fail instead. Keyed records carry `"mac": "hmac-sha256"`, so a keyed log checked without its key says so rather than "edited" |
 | Newest records dropped | Not detectable from the file; anchor the head hash externally (see above) |
 | Personal data in the log | Redacted by default: no observed values, no agent text (keyed digest only), expected values replaced unless named in `keep_fields` |
-| Alert spoofing | `WebhookAlert` signs every body with `X-Readback-Signature: sha256=<HMAC>` when a key is set; receivers must check it |
+| Alert spoofing | `WebhookAlert` signs every body with `X-Readback-Signature: sha256=<HMAC>` when `READBACK_ALERT_KEY` is set; receivers must check it |
+| Alert receiver forging the log | The alert key is separate from `READBACK_LOG_KEY` and the log key is never used for alerts. `WebhookAlert` refuses a key equal to `READBACK_LOG_KEY` or to a key passed to any `EvidenceLog` in the same process, at creation and before each send. It cannot see keys used only by other processes: keep explicit log and alert keys separate yourself |
+| Server-supplied paging link sends the verifier's token elsewhere | Each FHIR next link is resolved the way httpx will send it (so `//host/x` and similar forms count) and must stay on the client's scheme, host and port; anything else is `unverified` and is never requested |
+| Evidence log overwritten by the dashboard | `readback dashboard` refuses an output path that is the log itself or any existing `.jsonl` |
 | Hostile or broken server pages forever | FHIR and Stripe reads are page-capped; the result is `unverified`, not a hang |
 | SQL injection via claim | Table and column names come from your code and are pattern-checked; values are always bound parameters |
 | Unreadable system of record | `unverified`, never `verified` and never `failed` |
@@ -255,9 +283,10 @@ verified, and the evidence chain was intact.
 ```
 agent_readback/             core types, adapters, evidence log, report, dashboard, CLI
 agent_readback/verifiers/   FHIR, Stripe, SQL
-examples/healthcare/        mock FHIR server, agent tools, model providers, evaluation runner
+examples/healthcare/        mock FHIR server, agent tools, model providers, evaluation runner, LangGraph agent
 examples/stripe_sandbox.py  Stripe test-mode validation runner
 tests/                      offline test suite
+docs/ROADMAP.md             planned work, by architecture layer
 ```
 
 ## License

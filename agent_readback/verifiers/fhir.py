@@ -82,9 +82,26 @@ class FhirAppointmentVerifier:
             params = None
             if not url:
                 break
+            if url.startswith("/") and not url.startswith("//"):
+                # An absolute path is relative to the server origin; httpx would append it to base_url's
+                # path. join() parses it as a reference, so a #fragment or odd query cannot raise.
+                url = str(self.client.base_url.join(url))
+            self._same_origin(url)
         else:
             raise ValueError("FHIR pagination limit reached before all appointments were read")
         return found
+
+    def _same_origin(self, url: str) -> None:
+        # The client carries read-only credentials; never send them to a host the
+        # server named in a paging link. A foreign next link means `unverified`.
+        # Compare the URL httpx will actually send (after merging with base_url), so
+        # forms like //host/x or https:host are judged by where they really go.
+        try:
+            target, base = self.client.build_request("GET", url).url, self.client.base_url
+        except httpx.InvalidURL as error:  # not an HTTPError or ValueError; snapshot() must not crash
+            raise ValueError(f"FHIR next link is not a valid URL: {error}") from None
+        if (target.scheme, target.host, target.port) != (base.scheme, base.host, base.port):
+            raise ValueError(f"FHIR next link points off the server: {target.scheme}://{target.host}")
 
     def _one(self, appointment_id: str) -> dict[str, Any] | None:
         response = self.client.get(f"Appointment/{appointment_id}", headers={"Cache-Control": "no-cache"})

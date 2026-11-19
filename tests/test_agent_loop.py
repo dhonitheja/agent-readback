@@ -186,3 +186,14 @@ def test_no_store_is_rejected_for_providers_that_ignore_it(capsys):
     with pytest.raises(SystemExit) as raised:
         run_eval.main(["--provider", "openai", "--model", "gpt-6-luna", "--no-store"])
     assert raised.value.code == 2 and "--no-store only applies" in capsys.readouterr().err
+
+
+def test_reply_without_done_or_failed_is_counted_as_unclear(tmp_path, monkeypatch, capsys):
+    class Chatty:
+        def run(self, system, prompt, tools, call):
+            return "I have taken care of it."
+
+    monkeypatch.setattr(run_eval, "build_provider", lambda *_: Chatty())
+    summary = evaluate(tmp_path, "--runs", "3")
+    assert summary["outcomes"] == {"unclear_reply": 3} and summary["agent_said_done"] == 0
+    assert "neither DONE nor FAILED" in capsys.readouterr().out

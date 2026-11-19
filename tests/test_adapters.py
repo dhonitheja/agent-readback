@@ -226,6 +226,19 @@ def test_langgraph_tool_node_verifies_wrapped_tool(server, tools):
     assert [v.status for v in verdicts] == [Status.VERIFIED]
 
 
+def in_graph(node):
+    """LangGraph 1.x runs ToolNode only inside a graph; wrap it in a one-node graph."""
+    from langgraph.graph import END as GRAPH_END
+    from langgraph.graph import START as GRAPH_START
+    from langgraph.graph import MessagesState, StateGraph
+
+    graph = StateGraph(MessagesState)
+    graph.add_node("tools", node)
+    graph.add_edge(GRAPH_START, "tools")
+    graph.add_edge("tools", GRAPH_END)
+    return graph.compile()
+
+
 def test_cancellation_after_the_write_still_leaves_one_verdict(server, tools):
     anyio = pytest.importorskip("anyio")
     verdicts, log = [], []

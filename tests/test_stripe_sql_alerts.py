@@ -1,3 +1,4 @@
+import pytest
 import json
 import sqlite3
 from contextlib import closing
@@ -198,3 +199,70 @@ def test_stripe_endless_pagination_is_unverified_not_a_hang():
     client = httpx.Client(transport=httpx.MockTransport(handle), base_url="https://stripe.test")
     verdict = StripeRefundVerifier(client).check(REFUND, before=set())
     assert verdict.status is Status.UNVERIFIED
+
+
+def test_webhook_never_signs_with_the_evidence_log_key(monkeypatch):
+    import hashlib
+    import hmac
+
+    seen = []
+
+    def handle(request):
+        seen.append(request.headers.get("X-Readback-Signature"))
+        return httpx.Response(200)
+
+    monkeypatch.setenv("READBACK_LOG_KEY", "log-key")
+    monkeypatch.delenv("READBACK_ALERT_KEY", raising=False)
+    stripe = MockStripe()
+    verifier = StripeRefundVerifier(stripe.client())
+    alert = WebhookAlert("https://hooks.test/x", httpx.Client(transport=httpx.MockTransport(handle)))
+    with watch(verifier, REFUND, on_verdict=[alert]):
+        pass
+    assert seen == [None]  # receiver gets nothing derived from the log key
+
+    monkeypatch.setenv("READBACK_ALERT_KEY", "alert-key")
+    bodies = []
+    alert = WebhookAlert(
+        "https://hooks.test/x",
+        httpx.Client(transport=httpx.MockTransport(lambda r: bodies.append(r) or httpx.Response(200))),
+    )
+    with watch(verifier, REFUND, on_verdict=[alert]):
+        pass
+    body = bodies[0].content
+    assert bodies[0].headers["X-Readback-Signature"] == "sha256=" + hmac.new(b"alert-key", body, hashlib.sha256).hexdigest()
+    assert bodies[0].headers["X-Readback-Signature"] != "sha256=" + hmac.new(b"log-key", body, hashlib.sha256).hexdigest()
+
+
+def test_alert_key_equal_to_the_log_key_is_refused(monkeypatch):
+    monkeypatch.setenv("READBACK_LOG_KEY", "same")
+    monkeypatch.setenv("READBACK_ALERT_KEY", "same")
+    with pytest.raises(ValueError, match="must differ"):
+        WebhookAlert("https://hooks.test/x")
+    with pytest.raises(ValueError, match="must differ"):
+        WebhookAlert("https://hooks.test/x", key=b"same")
+    monkeypatch.setenv("READBACK_ALERT_KEY", "different")
+    assert WebhookAlert("https://hooks.test/x").key == b"different"
+
+
+def test_alert_key_equal_to_an_explicit_log_key_is_refused(monkeypatch, tmp_path):
+    from agent_readback import EvidenceLog
+
+    monkeypatch.delenv("READBACK_LOG_KEY", raising=False)
+    monkeypatch.delenv("READBACK_ALERT_KEY", raising=False)
+    EvidenceLog(tmp_path / "e.jsonl", key="explicit-shared")
+    with pytest.raises(ValueError, match="must differ"):
+        WebhookAlert("https://hooks.test/x", key="explicit-shared")
+
+
+def test_alert_created_before_the_log_takes_its_key_is_not_sent(monkeypatch, tmp_path):
+    from agent_readback import EvidenceLog
+
+    monkeypatch.delenv("READBACK_LOG_KEY", raising=False)
+    sent = []
+    client = httpx.Client(transport=httpx.MockTransport(lambda r: sent.append(r) or httpx.Response(200)))
+    alert = WebhookAlert("https://hooks.test/x", client, key="late-shared")
+    EvidenceLog(tmp_path / "e.jsonl", key="late-shared")
+    stripe = MockStripe()
+    with watch(StripeRefundVerifier(stripe.client()), REFUND, on_verdict=[alert]):
+        pass
+    assert sent == [] and "evidence-log key" in str(alert.last_error)

@@ -9,3 +9,4 @@ build/
 graphify-out/
 .test-tmp*/
 .test-python*/
+.venv/
