@@ -1,6 +1,6 @@
 [project]
 name = "agent-readback"
-version = "0.2.1"
+version = "0.2.2"
 description = "Readback: check what an AI agent says it did against the system of record."
 readme = "README.md"
 requires-python = ">=3.10"
