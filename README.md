@@ -1,5 +1,7 @@
 # Readback
 
+[![tests](https://github.com/dhonitheja/agent-readback/actions/workflows/tests.yml/badge.svg)](https://github.com/dhonitheja/agent-readback/actions/workflows/tests.yml)
+
 Check what an AI agent says it did against the system of record.
 
 An agent that books an appointment, issues a refund or updates a row usually
