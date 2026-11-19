@@ -37,7 +37,7 @@ flowchart LR
 
 ## What is tested and what is not
 
-Version 0.2.1. All 75 offline tests pass with the optional test dependencies
+Version 0.2.1. All 76 offline tests pass with the optional test dependencies
 installed. A separate public HAPI FHIR R4
 sandbox run verified 10 scripted operations (6 bookings, 1 reschedule,
 3 cancellations); this is a compatibility smoke test, not production validation.
