@@ -15,7 +15,7 @@ import sys
 from pathlib import Path
 
 from .dashboard import render_html
-from .evidence import KEY_ENV, EvidenceLog
+from .evidence import KEY_ENV, EvidenceLog, FileAnchor
 from .report import render, summarise
 
 OK, BROKEN, USAGE, FILE_ERROR = 0, 1, 2, 3
@@ -34,6 +34,9 @@ def main(argv: list[str] | None = None) -> int:
         sub.add_argument("path")
         sub.add_argument("--require-key", action="store_true", help=f"fail unless {KEY_ENV} is set")
     subs[2].add_argument("-o", "--out", default="readback-report.html")
+    anchored = subs[0].add_mutually_exclusive_group()
+    anchored.add_argument("--anchor", metavar="FILE", help="fail unless the log still holds the head recorded by FileAnchor")
+    anchored.add_argument("--head", metavar="HASH", help="fail unless the log still holds this head hash (from an earlier verify-log)")
     args = parser.parse_args(argv)
 
     path = Path(args.path)
@@ -62,8 +65,30 @@ def main(argv: list[str] | None = None) -> int:
     where = f"record {bad} (line {bad + 1})" if bad is not None else ""
 
     if args.command == "verify-log":
+        anchor_note = ""
+        if intact and (args.anchor or args.head):
+            if args.anchor:
+                try:
+                    count, head = FileAnchor(args.anchor).read()
+                except OSError as error:
+                    print(f"ERROR: cannot read anchor {args.anchor}: {error}", file=sys.stderr)
+                    return FILE_ERROR
+                except ValueError as error:
+                    print(f"ERROR: {error}", file=sys.stderr)
+                    return FILE_ERROR
+            else:
+                wanted = args.head.strip().lower()
+                found = [i for i, record in enumerate(records) if record["hash"] == wanted]
+                count, head = (found[0] + 1, wanted) if found else (0, wanted)
+            problem = log.check_anchor(count, head) if count else (
+                "the given head is not in the log: newest records were dropped or the log was rewritten")
+            if problem:
+                print(f"BROKEN: {problem}")
+                return BROKEN
+            later = len(records) - count
+            anchor_note = f"; anchored head found at record {count - 1}" + (f", {later} record(s) after it" if later else "")
         if intact:
-            print(f"OK: {len(records)} records, chain intact" + (" (UNKEYED)" if unkeyed else ""))
+            print(f"OK: {len(records)} records, chain intact" + (" (UNKEYED)" if unkeyed else "") + anchor_note)
             print(f"head: {log.head}   (store this outside the log; a shorter log with another head was truncated)")
             return OK
         print(f"BROKEN: {where} of {len(records)} does not match the chain")

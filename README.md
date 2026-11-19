@@ -39,7 +39,7 @@ flowchart LR
 
 ## What is tested and what is not
 
-Version 0.2.2. All 114 offline tests pass with the optional test dependencies
+Version 0.2.2. All 119 offline tests pass with the optional test dependencies
 installed. A separate public HAPI FHIR R4
 sandbox run verified 10 scripted operations (6 bookings, 1 reschedule,
 3 cancellations); this is a compatibility smoke test, not production validation.
@@ -207,9 +207,28 @@ HMAC-SHA256, so nobody without the key can rewrite the chain and pass it off
 as genuine. Always set it in production. The file is created readable by its
 owner only and opened append-only; use one writer per file.
 
-Truncation (dropping the newest records) cannot be seen from the file alone.
-Store the head hash that `verify-log` prints somewhere the log writer cannot
-reach (a ticket, a separate log, a KMS-signed note) and compare on audit.
+Truncation (dropping the newest records) cannot be seen from the file alone,
+so anchor the head outside it. `FileAnchor` rewrites a small file with the
+record count and head hash after every append; put that file where the log
+writer cannot change it (another volume or account, a synced or append-only
+store). Any callable `anchor(count, head)` works, for example one that posts to
+a ticket or a KMS-signed store. A failed anchor never breaks the agent: it
+warns and sets `log.anchor_error`.
+
+```python
+from agent_readback import EvidenceLog, FileAnchor
+
+log = EvidenceLog("evidence.jsonl", anchor=FileAnchor("/secure/readback-head.json"))
+```
+
+```bash
+readback verify-log evidence.jsonl --anchor /secure/readback-head.json   # BROKEN if newest records were dropped
+readback verify-log evidence.jsonl --head <hash from an earlier verify-log>
+```
+
+Records added after the anchored head are reported, not rejected. Whoever can
+edit both the log and the anchor can still truncate undetected, and without a
+key they can also forge new records after the anchored head.
 
 By default the log stores no values from the system of record and no agent
 text, only field names, match results and a hash of the agent's message. Pass
@@ -238,7 +257,7 @@ restricted key with `refunds: read`, a database role with `SELECT` only).
 | Agent crashes after writing | `watch` still checks and logs before the exception propagates |
 | Evidence record edited, deleted or reordered | Sequence number + hash chain; `verify-log` reports the first bad record |
 | Whole chain rewritten by someone with file access | HMAC-SHA256 with `READBACK_LOG_KEY`; a chain built without the key fails verification. Without the key, an OK is labelled `UNKEYED` (not forgery-proof); `--require-key` makes audits fail instead. Keyed records carry `"mac": "hmac-sha256"`, so a keyed log checked without its key says so rather than "edited" |
-| Newest records dropped | Not detectable from the file; anchor the head hash externally (see above) |
+| Newest records dropped | Not detectable from the file alone. `EvidenceLog(anchor=FileAnchor(...))` records the count and head after every append; `verify-log --anchor FILE` or `--head HASH` reports BROKEN when the anchored head is missing. The anchor must live where the log writer cannot change it |
 | Personal data in the log | Redacted by default: no observed values, no agent text (keyed digest only), expected values replaced unless named in `keep_fields` |
 | Alert spoofing | `WebhookAlert` signs every body with `X-Readback-Signature: sha256=<HMAC>` when `READBACK_ALERT_KEY` is set; receivers must check it |
 | Alert receiver forging the log | The alert key is separate from `READBACK_LOG_KEY` and the log key is never used for alerts. `WebhookAlert` refuses a key equal to `READBACK_LOG_KEY` or to a key passed to any `EvidenceLog` in the same process, at creation and before each send. It cannot see keys used only by other processes: keep explicit log and alert keys separate yourself |

@@ -9,8 +9,10 @@ cannot rewrite the chain from genesis and present it as genuine. Without a
 key the chain still detects accidental damage, but not deliberate forgery.
 
 Truncation (dropping the newest records) cannot be detected from the file
-alone. Record the head hash (`EvidenceLog.head`, printed by `readback
-verify-log`) somewhere the log writer cannot reach, and compare.
+alone. Pass `anchor=` (for example `FileAnchor(path)`) and the log reports
+its record count and head hash after every append to somewhere the log writer
+cannot reach; `readback verify-log --anchor FILE` (or `--head HASH`) then
+fails on a log that lost its newest records.
 
 By default the log stores no values read from the system of record and no
 agent text, because those can contain personal data. It stores field names,
@@ -31,8 +33,9 @@ import json
 import os
 import re
 import threading
+import warnings
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 from .core import Verdict
 
@@ -102,11 +105,44 @@ def redact(body: dict[str, Any], keep: frozenset[str], key: bytes | None = None)
     }
 
 
+Anchor = Callable[[int, str], None]  # called with (record count, head hash) after each append
+
+
+class FileAnchor:
+    """Keep a log's newest (record count, head hash) in a separate small file.
+
+    Put the file where the log writer cannot rewrite it: another volume or
+    account, a synced or append-only store. Whoever can edit both the log and
+    the anchor can still truncate undetected.
+    """
+
+    def __init__(self, path: str | Path) -> None:
+        self.path = Path(path)
+
+    def __call__(self, count: int, head: str) -> None:
+        tmp = self.path.with_name(self.path.name + ".tmp")
+        tmp.write_text(json.dumps({"count": count, "head": head}), encoding="utf-8")
+        os.replace(tmp, self.path)  # readers never see a half-written anchor
+
+    def read(self) -> tuple[int, str]:
+        try:
+            data = json.loads(self.path.read_text(encoding="utf-8"))
+            count, head = data["count"], data["head"]
+        except (ValueError, KeyError, TypeError) as error:
+            raise ValueError(f"{self.path} is not a Readback anchor: {error}") from None
+        if type(count) is not int or count < 1 or not isinstance(head, str) or not _HEX64.match(head):
+            raise ValueError(f"{self.path} is not a Readback anchor: bad count or head")
+        return count, head
+
+
 class EvidenceLog:
     def __init__(
-        self, path: str | Path, keep_fields: Iterable[str] | str = (), key: bytes | str | None = None
+        self, path: str | Path, keep_fields: Iterable[str] | str = (), key: bytes | str | None = None,
+        anchor: Anchor | None = None,
     ) -> None:
         self.path = Path(path)
+        self.anchor = anchor
+        self.anchor_error: Exception | None = None
         self.keep_all = keep_fields == "*"
         self.keep = frozenset() if self.keep_all else frozenset(keep_fields)
         self.key = _key_from(key)
@@ -145,6 +181,13 @@ class EvidenceLog:
             handle.write(json.dumps(record) + "\n")
         self._last = record["hash"]
         self._count += 1
+        if self.anchor is not None:
+            try:
+                self.anchor(self._count, self._last)
+                self.anchor_error = None
+            except Exception as error:  # never break the agent's flow; surface the gap instead
+                self.anchor_error = error
+                warnings.warn(f"evidence log anchor failed: {error}", RuntimeWarning, stacklevel=4)
         return self._last
 
     def records(self) -> list[dict[str, Any]]:
@@ -184,6 +227,15 @@ class EvidenceLog:
                 return False, index
             prev = record["hash"]
         return True, None
+
+    def check_anchor(self, count: int, head: str) -> str | None:
+        """None if record `count` of this log has hash `head`; otherwise what is wrong."""
+        records = self.records()
+        if len(records) < count:
+            return f"the log has {len(records)} records but the anchor says {count}: newest records were dropped"
+        if not hmac.compare_digest(records[count - 1]["hash"], head):
+            return f"record {count - 1} (line {count}) does not match the anchored head: the log was rewritten"
+        return None
 
     def needs_key(self) -> bool:
         """True if records say they were written with a key that this log does not have."""
