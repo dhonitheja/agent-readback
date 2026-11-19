@@ -280,9 +280,10 @@ verified, and the evidence chain was intact.
 ```
 agent_readback/             core types, adapters, evidence log, report, dashboard, CLI
 agent_readback/verifiers/   FHIR, Stripe, SQL
-examples/healthcare/        mock FHIR server, agent tools, model providers, evaluation runner
+examples/healthcare/        mock FHIR server, agent tools, model providers, evaluation runner, LangGraph agent
 examples/stripe_sandbox.py  Stripe test-mode validation runner
 tests/                      offline test suite
+docs/ROADMAP.md             planned work, by architecture layer
 ```
 
 ## License
