@@ -5,7 +5,7 @@ from .alerts import WebhookAlert
 from .core import Claim, Finding, FindingKind, Status, Verdict, Verifier, compare_fields, watch
 from .evidence import EvidenceLog
 
-__version__ = "0.2.1"
+__version__ = "0.2.2"
 __all__ = [
     "Claim",
     "EvidenceLog",

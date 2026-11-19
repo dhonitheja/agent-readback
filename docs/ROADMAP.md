@@ -26,8 +26,8 @@ examples: run_eval harness, LangGraph agent, mock FHIR server, Stripe sandbox ru
 
 | # | Step | Layer | Why | Depends on |
 |---|---|---|---|---|
-| 1 | Land the hardening PR: CodeRabbit review and autofix, then merge | all | Security fixes and the LangGraph agent | — |
-| 2 | Release 0.2.2: version bump, CHANGELOG with breaking changes (missing file exits 3; alerts need `READBACK_ALERT_KEY`), rebuild `dist/` | packaging | Behaviour changes need a version | 1 |
+| 1 | ~~Land the hardening PR: CodeRabbit review and autofix, then merge~~ (done, PR #2) | all | Security fixes and the LangGraph agent | — |
+| 2 | ~~Release 0.2.2~~ (done): version bump, CHANGELOG with breaking changes (missing file exits 3; alerts need `READBACK_ALERT_KEY`), rebuild `dist/` | packaging | Behaviour changes need a version | 1 |
 | 3 | CI on GitHub Actions: Linux and Windows; MCP 1.x and 2.x; LangGraph 0.2 and 1.x | tests | Both MCP majors are only checked by hand today | 1 |
 | 4 | FHIR verifier with authenticated read-only access on a test EHR (OAuth read scope) | verifiers | The core promise, independent verifier credentials, is untested against a real auth server | test EHR access |
 | 5 | SQL verifier on Postgres with a `SELECT`-only role | verifiers | Only SQLite is tested | Postgres instance |
