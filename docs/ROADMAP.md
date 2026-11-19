@@ -32,7 +32,7 @@ examples: run_eval harness, LangGraph agent, mock FHIR server, Stripe sandbox ru
 | 4 | FHIR verifier with authenticated read-only access on a test EHR (OAuth read scope) | verifiers | The core promise, independent verifier credentials, is untested against a real auth server | test EHR access |
 | 5 | SQL verifier on Postgres with a `SELECT`-only role | verifiers | Only SQLite is tested | Postgres instance |
 | 6 | Re-check pending Stripe refunds later instead of leaving them `unverified` | core, verifiers | Known limit | — |
-| 7 | Anchor the evidence-log head hash outside the log (webhook or separate store) | evidence | Dropping the newest records is undetectable from the file alone | — |
+| 7 | ~~Anchor the evidence-log head hash outside the log~~ (done: `anchor=`, `FileAnchor`, `verify-log --anchor/--head`) | evidence | Dropping the newest records is undetectable from the file alone | — |
 | 8 | Rate-limit the verifier's own reads | verifiers | Known limit; matters under production load | — |
 | 9 | Real-model eval on the LangGraph agent, 50+ runs per model | examples | The 3-run smoke test cannot compare models | API keys |
 | 10 | MCP over HTTP, not only in-memory and stdio | adapters | Listed as untested | — |

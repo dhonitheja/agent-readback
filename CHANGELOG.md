@@ -2,6 +2,17 @@
 
 All notable changes to `agent-readback`. Dates are UTC.
 
+## Unreleased
+
+### Added
+
+- Truncation detection. `EvidenceLog(path, anchor=...)` calls the anchor
+  with `(record count, head hash)` after every append; `FileAnchor(path)`
+  keeps them in a separate file, written atomically. `readback verify-log
+  --anchor FILE` or `--head HASH` reports BROKEN when the anchored head is no
+  longer in the log. A failing anchor warns and sets `log.anchor_error`
+  instead of breaking the agent.
+
 ## 0.2.2 — 2026-11-19
 
 ### Breaking changes

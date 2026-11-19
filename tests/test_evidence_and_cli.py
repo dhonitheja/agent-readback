@@ -298,3 +298,64 @@ def test_parallel_appends_keep_the_chain_intact(tmp_path):
     for thread in threads:
         thread.join()
     assert len(log.records()) == 40 and log.verify_chain() == (True, None)
+
+
+def _anchored_log(tmp_path, n=3):
+    from agent_readback import FileAnchor
+
+    anchor = FileAnchor(tmp_path / "anchor" / "head.json")
+    anchor.path.parent.mkdir()
+    log = EvidenceLog(tmp_path / "log.jsonl", anchor=anchor)
+    for i in range(n):
+        log.append(verdict(i))
+    return log, anchor
+
+
+def test_dropping_the_newest_records_is_caught_with_an_anchor(tmp_path, capsys):
+    log, anchor = _anchored_log(tmp_path)
+    assert anchor.read() == (3, log.head)
+    path = str(log.path)
+    assert main(["verify-log", path, "--anchor", str(anchor.path)]) == 0
+
+    lines = log.path.read_text().splitlines()
+    log.path.write_text("\n".join(lines[:-1]) + "\n")  # attacker drops the newest record
+    assert main(["verify-log", path]) == 0  # the file alone still looks intact...
+    capsys.readouterr()
+    assert main(["verify-log", path, "--anchor", str(anchor.path)]) == 1  # ...the anchor does not
+    assert "newest records were dropped" in capsys.readouterr().out
+
+
+def test_head_flag_catches_truncation_and_allows_later_growth(tmp_path, capsys):
+    log, _ = _anchored_log(tmp_path)
+    head = log.head
+    log.append(verdict(9))  # growth after the head was noted is fine
+    assert main(["verify-log", str(log.path), "--head", head.upper()]) == 0
+    assert "1 record(s) after it" in capsys.readouterr().out
+
+    lines = log.path.read_text().splitlines()
+    log.path.write_text("\n".join(lines[:2]) + "\n")
+    assert main(["verify-log", str(log.path), "--head", head]) == 1
+
+
+def test_rewritten_record_at_the_anchor_is_caught(tmp_path, capsys):
+    log, anchor = _anchored_log(tmp_path)
+    count, head = anchor.read()
+    assert log.check_anchor(count, head) is None
+    assert "rewritten" in log.check_anchor(count, "0" * 64)
+
+
+def test_failed_anchor_never_breaks_the_append(tmp_path):
+    def broken(count, head):
+        raise OSError("anchor store is down")
+
+    log = EvidenceLog(tmp_path / "log.jsonl", anchor=broken)
+    with pytest.warns(RuntimeWarning, match="anchor failed"):
+        log.append(verdict(1))
+    assert len(log.records()) == 1 and isinstance(log.anchor_error, OSError)
+
+
+def test_bad_or_missing_anchor_file_exits_3(tmp_path):
+    log, anchor = _anchored_log(tmp_path)
+    assert main(["verify-log", str(log.path), "--anchor", str(tmp_path / "missing.json")]) == 3
+    anchor.path.write_text('{"count": "3", "head": "x"}')
+    assert main(["verify-log", str(log.path), "--anchor", str(anchor.path)]) == 3
