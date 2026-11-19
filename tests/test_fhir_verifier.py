@@ -1,4 +1,5 @@
 import pytest
+import httpx
 
 from agent_readback import Claim, FindingKind, Status, watch
 from agent_readback.verifiers import FhirAppointmentVerifier
@@ -9,6 +10,40 @@ from .conftest import DOCTOR, END, LATER, LATER_END, PATIENT, START, create_clai
 
 def kinds(verdict):
     return [finding.kind for finding in verdict.findings]
+
+
+def test_readback_bypasses_cached_prewrite_search(server, tools):
+    cached = None
+
+    def handle(request):
+        nonlocal cached
+        fresh = server._handle(request)
+        if request.url.path.endswith("/Appointment"):
+            if cached is None:
+                cached = fresh.json()
+            if request.headers.get("Cache-Control") != "no-cache":
+                return httpx.Response(200, json=cached)
+        return fresh
+
+    with httpx.Client(transport=httpx.MockTransport(handle), base_url="https://fhir.test") as client:
+        verifier = FhirAppointmentVerifier(client)
+        claim = create_claim()
+        before = verifier.snapshot(claim)
+        tools["book_appointment"](PATIENT, DOCTOR, START, END)
+        assert verifier.check(claim, before).status is Status.VERIFIED
+
+
+def test_incomplete_pagination_is_unverified():
+    def handle(request):
+        return httpx.Response(200, json={
+            "entry": [],
+            "link": [{"relation": "next", "url": "Appointment?page=next"}],
+        })
+
+    with httpx.Client(transport=httpx.MockTransport(handle), base_url="https://fhir.test") as client:
+        verifier = FhirAppointmentVerifier(client)
+        assert verifier.snapshot(create_claim()) is None
+        assert verifier.check(create_claim(), set()).status is Status.UNVERIFIED
 
 
 def book(server, tools, fault="ok", claim=None):
@@ -130,3 +165,22 @@ def test_settle_attempts_rechecks_a_write_that_lands_late(server, tools):
     with watch(verifier, create_claim(), settle_attempts=3, settle_delay=0.2, sleep=late_write) as watched:
         tools["book_appointment"](PATIENT, DOCTOR, START, END)
     assert watched.verdict.status is Status.VERIFIED and naps == [0.2]
+
+
+def test_agent_exception_still_produces_a_verdict_and_a_log_record(server, tools, tmp_path):
+    from agent_readback import EvidenceLog
+
+    log = EvidenceLog(tmp_path / "e.jsonl")
+    verifier = FhirAppointmentVerifier(server.client())
+    with pytest.raises(KeyError):
+        with watch(verifier, create_claim(), log) as watched:
+            tools["book_appointment"](PATIENT, DOCTOR, START, END)
+            raise KeyError("malformed model response")
+    assert watched.verdict.status is Status.VERIFIED
+    assert len(log.records()) == 1
+
+
+def test_resources_without_an_id_are_not_collapsed():
+    from agent_readback.verifiers.fhir import flatten_appointment
+
+    assert flatten_appointment({"status": "booked"})["id"] is None

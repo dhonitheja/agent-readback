@@ -35,7 +35,7 @@ class Claim:
     action: str               # e.g. "fhir.appointment.create"
     agent_said: str           # the agent's own completion message, kept as evidence
     expected: dict[str, Any]  # field -> value that the system of record must show
-    context: dict[str, Any] = field(default_factory=dict)  # run id, model name, etc.
+    context: dict[str, Any] = field(default_factory=dict)  # run id, model name, etc. Stored unredacted in the evidence log: no personal data here.
 
 
 @dataclass(frozen=True)
@@ -81,9 +81,11 @@ def compare_fields(expected: dict[str, Any], actual: dict[str, Any]) -> list[Fin
     findings: list[Finding] = []
     for name, want in expected.items():
         have = actual.get(name)
+        if have == want:
+            continue
         if have is None:
             findings.append(Finding(FindingKind.WRONG_VALUE, f"{name} is not set", name, want, None))
-        elif have != want:
+        else:
             findings.append(
                 Finding(FindingKind.WRONG_VALUE, f"{name} is {have!r}, expected {want!r}", name, want, have)
             )
@@ -99,6 +101,31 @@ class Watch:
 
     def claims(self, claim: Claim) -> None:
         self.claim = claim
+
+    def _record(self, verdict: Verdict, log: Any, on_verdict: Iterable[Callable[[Verdict], None]]) -> None:
+        self.verdict = verdict
+        if log is not None:
+            log.append(verdict)
+        for callback in on_verdict:
+            callback(verdict)
+
+
+def _check(
+    verifier: Verifier,
+    claim: Claim,
+    before: Any,
+    *,
+    settle_attempts: int = 1,
+    settle_delay: float = 0.5,
+    sleep: Callable[[float], None] = time.sleep,
+) -> Verdict:
+    verdict = verifier.check(claim, before)
+    for _ in range(max(settle_attempts, 1) - 1):
+        if verdict.status is not Status.FAILED:
+            break
+        sleep(settle_delay)
+        verdict = verifier.check(claim, before)
+    return verdict
 
 
 @contextmanager
@@ -130,16 +157,13 @@ def watch(
     """
     held = Watch()
     before = verifier.snapshot(probe)
-    yield held
-    claim = held.claim or probe
-    verdict = verifier.check(claim, before)
-    for _ in range(max(settle_attempts, 1) - 1):
-        if verdict.status is not Status.FAILED:
-            break
-        sleep(settle_delay)
-        verdict = verifier.check(claim, before)
-    held.verdict = verdict
-    if log is not None:
-        log.append(verdict)
-    for callback in on_verdict:
-        callback(verdict)
+    try:
+        yield held
+    finally:
+        # Runs even when the agent raises: the system of record may have changed
+        # before the crash, and that must leave a verdict and an evidence record.
+        verdict = _check(
+            verifier, held.claim or probe, before,
+            settle_attempts=settle_attempts, settle_delay=settle_delay, sleep=sleep,
+        )
+        held._record(verdict, log, on_verdict)

@@ -1,5 +1,6 @@
 import json
 import sqlite3
+from contextlib import closing
 
 import httpx
 
@@ -77,7 +78,7 @@ def test_stripe_unreachable_is_unverified():
 
 def make_db(tmp_path):
     path = str(tmp_path / "app.db")
-    with sqlite3.connect(path) as db:
+    with closing(sqlite3.connect(path)) as db, db:
         db.execute("CREATE TABLE orders (id TEXT PRIMARY KEY, status TEXT, total INTEGER)")
         db.execute("INSERT INTO orders VALUES ('o1', 'open', 500)")
     return path
@@ -87,7 +88,7 @@ def sql_run(tmp_path, action_name, expected, statements):
     path = make_db(tmp_path)
     verifier = SqlRowVerifier(lambda: sqlite3.connect(path), "orders", "id", placeholder="?")
     with watch(verifier, Claim(action_name, "DONE", expected)) as watched:
-        with sqlite3.connect(path) as db:
+        with closing(sqlite3.connect(path)) as db, db:
             for statement in statements:
                 db.execute(statement)
     return watched.verdict
@@ -110,6 +111,17 @@ def test_sql_insert_with_an_unclaimed_extra_row(tmp_path):
         ["INSERT INTO orders VALUES ('o2', 'open', 900)", "INSERT INTO orders VALUES ('o3', 'open', 900)"],
     )
     assert verdict.status is Status.FAILED and kinds(verdict) == [FindingKind.EXTRA_EFFECT]
+
+
+def test_sql_insert_with_deleted_existing_row(tmp_path):
+    verdict = sql_run(
+        tmp_path,
+        "sql.row.insert",
+        {"id": "o2", "status": "open", "total": 900},
+        ["INSERT INTO orders VALUES ('o2', 'open', 900)", "DELETE FROM orders WHERE id = 'o1'"],
+    )
+    assert verdict.status is Status.FAILED
+    assert kinds(verdict) == [FindingKind.EXTRA_EFFECT]
 
 
 def test_sql_update_wrong_value_and_deleted_rows(tmp_path):
@@ -145,3 +157,44 @@ def test_webhook_fires_only_for_problems_and_carries_no_values():
         pass
     assert len(sent) == 1 and sent[0]["status"] == "failed"
     assert "pi_1" not in json.dumps(sent[0]) and "2500" not in json.dumps(sent[0])
+
+
+def test_stripe_pending_refund_is_unverified_not_verified():
+    verdict = stripe_run(lambda s: s.refund("pi_1", 2500, status="pending"))
+    assert verdict.status is Status.UNVERIFIED and kinds(verdict) == [FindingKind.UNREACHABLE]
+
+
+def test_webhook_with_a_bad_url_never_breaks_the_agent():
+    alert = WebhookAlert("not a url")
+    stripe = MockStripe()
+    with watch(StripeRefundVerifier(stripe.client()), REFUND, on_verdict=[alert]):
+        pass
+    assert alert.last_error is not None
+
+
+def test_webhook_is_signed_when_a_key_is_set():
+    import hashlib
+    import hmac
+
+    seen = {}
+
+    def handle(request):
+        seen["sig"] = request.headers.get("X-Readback-Signature")
+        seen["body"] = request.content
+        return httpx.Response(200)
+
+    alert = WebhookAlert("https://hooks.test/x", httpx.Client(transport=httpx.MockTransport(handle)), key="k")
+    stripe = MockStripe()
+    with watch(StripeRefundVerifier(stripe.client()), REFUND, on_verdict=[alert]):
+        pass
+    expected = "sha256=" + hmac.new(b"k", seen["body"], hashlib.sha256).hexdigest()
+    assert seen["sig"] == expected
+
+
+def test_stripe_endless_pagination_is_unverified_not_a_hang():
+    def handle(request):
+        return httpx.Response(200, json={"data": [{"id": "re_x", "payment_intent": "pi_1"}], "has_more": True})
+
+    client = httpx.Client(transport=httpx.MockTransport(handle), base_url="https://stripe.test")
+    verdict = StripeRefundVerifier(client).check(REFUND, before=set())
+    assert verdict.status is Status.UNVERIFIED
