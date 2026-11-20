@@ -2,7 +2,7 @@
 
 All notable changes to `agent-readback`. Dates are UTC.
 
-## Unreleased
+## 0.3.0 — 2026-11-20
 
 ### Added
 
