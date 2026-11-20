@@ -7,7 +7,9 @@ Action:
 It lists refunds for the payment intent before and after the action. A refund
 that was claimed but is absent is `missing`; a wrong amount or currency is
 `wrong_value`; a second new refund is `extra_effect` (a double refund). A refund
-still `pending` with the bank is `unverified`, not `verified`: re-check later.
+that matches but is still `pending` with the bank is `unverified` with a
+`pending` finding; pass that verdict to `agent_readback.recheck` once the bank
+has had time to settle it.
 
 Build the client with a restricted, read-only Stripe key, for example:
     httpx.Client(base_url="https://api.stripe.com", auth=(RESTRICTED_KEY, ""))
@@ -70,9 +72,10 @@ class StripeRefundVerifier:
         ranked = sorted(created, key=lambda item: len(compare_fields(claim.expected, item)))
         best, others = ranked[0], ranked[1:]
         findings = compare_fields(claim.expected, best)
-        if "status" not in claim.expected and best.get("status") == "pending":
+        if "status" not in claim.expected and best.get("status") == "pending" and not findings and not others:
             # Not yet settled by the bank: neither proven nor contradicted. Re-check later.
-            return unreachable(f"refund {best['id']} is still pending")
+            pending = Finding(FindingKind.PENDING, f"refund {best['id']} is still pending; re-check later")
+            return Verdict(Status.UNVERIFIED, claim, (pending,), {"created": created})
         if "status" not in claim.expected and best.get("status") in ("failed", "canceled"):
             findings.append(
                 Finding(FindingKind.WRONG_VALUE, f"refund status is {best['status']!r}", "status", "succeeded", best["status"])
@@ -83,3 +86,12 @@ class StripeRefundVerifier:
         ]
         status = Status.VERIFIED if not findings else Status.FAILED
         return Verdict(status, claim, tuple(findings), {"created": created})
+
+    def recheck(self, claim: Claim, observed: dict[str, Any]) -> Verdict:
+        """Judge the refunds seen at the first check again; refunds created since then are not counted."""
+        try:
+            first = {item["id"] for item in observed["created"]}
+            now = set(self._refunds(claim.expected["payment_intent"]))
+        except (httpx.HTTPError, KeyError, TypeError, ValueError) as error:
+            return Verdict(Status.UNVERIFIED, claim, (Finding(FindingKind.UNREACHABLE, f"could not re-check Stripe: {error}"),))
+        return self.check(claim, now - first)

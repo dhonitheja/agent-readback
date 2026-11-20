@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import time
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Callable, Iterable, Iterator, Protocol
@@ -26,6 +26,7 @@ class FindingKind(str, Enum):
     WRONG_VALUE = "wrong_value"    # the effect exists but a field differs
     EXTRA_EFFECT = "extra_effect"  # something changed that the claim did not cover
     UNREACHABLE = "unreachable"    # the system of record could not be read
+    PENDING = "pending"            # the effect exists but has not settled yet; re-check later
 
 
 @dataclass(frozen=True)
@@ -126,6 +127,40 @@ def _check(
         sleep(settle_delay)
         verdict = verifier.check(claim, before)
     return verdict
+
+
+def recheck(
+    verifier: Verifier,
+    verdict: Verdict | dict[str, Any],
+    log: Any | None = None,
+    *,
+    on_verdict: Iterable[Callable[[Verdict], None]] = (),
+) -> Verdict:
+    """Judge an unverified verdict again later, for example a refund the bank had not settled.
+
+    `verdict` is the Verdict or its `to_dict()`. Keep that in your own queue:
+    the evidence log redacts the claim, so it cannot be rebuilt from the log.
+    The verifier needs a `recheck(claim, observed)` method; without one the
+    result stays unverified. The new verdict is logged and passed to
+    `on_verdict` with `context["recheck_of"]` set to the first `checked_at`.
+    Only unverified verdicts are re-checked: a verified or failed verdict is
+    already evidence and is never overturned.
+    """
+    if isinstance(verdict, dict):
+        status, claim = Status(verdict["status"]), Claim(**verdict["claim"])
+        observed, first = verdict.get("observed"), verdict["checked_at"]
+    else:
+        status, claim, observed, first = verdict.status, verdict.claim, verdict.observed, verdict.checked_at
+    if status is not Status.UNVERIFIED:
+        raise ValueError(f"only unverified verdicts are re-checked, not {status.value!r}")
+    claim = replace(claim, context={**claim.context, "recheck_of": first})
+    again = getattr(verifier, "recheck", None)
+    if again is None or not observed:
+        new = Verdict(Status.UNVERIFIED, claim, (Finding(FindingKind.UNREACHABLE, "nothing to re-check"),))
+    else:
+        new = again(claim, observed)
+    Watch()._record(new, log, on_verdict)
+    return new
 
 
 @contextmanager
