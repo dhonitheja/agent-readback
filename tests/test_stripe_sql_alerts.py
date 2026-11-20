@@ -5,7 +5,7 @@ from contextlib import closing
 
 import httpx
 
-from agent_readback import Claim, FindingKind, Status, WebhookAlert, watch
+from agent_readback import Claim, EvidenceLog, FindingKind, Status, WebhookAlert, recheck, watch
 from agent_readback.verifiers import SqlRowVerifier, StripeRefundVerifier
 
 
@@ -162,7 +162,83 @@ def test_webhook_fires_only_for_problems_and_carries_no_values():
 
 def test_stripe_pending_refund_is_unverified_not_verified():
     verdict = stripe_run(lambda s: s.refund("pi_1", 2500, status="pending"))
-    assert verdict.status is Status.UNVERIFIED and kinds(verdict) == [FindingKind.UNREACHABLE]
+    assert verdict.status is Status.UNVERIFIED and kinds(verdict) == [FindingKind.PENDING]
+
+
+def test_stripe_pending_refund_with_wrong_amount_is_failed_not_pending():
+    verdict = stripe_run(lambda s: s.refund("pi_1", 250, status="pending"))
+    assert verdict.status is Status.FAILED and [f.field for f in verdict.findings] == ["amount"]
+
+
+def pending_then(settle, tmp_path=None, as_dict=False):
+    stripe = MockStripe()
+    stripe.refund("pi_1", 1000)
+    verifier = StripeRefundVerifier(stripe.client())
+    with watch(verifier, REFUND) as watched:
+        stripe.refund("pi_1", 2500, status="pending")
+    first = watched.verdict
+    assert kinds(first) == [FindingKind.PENDING]
+    settle(stripe)
+    stored = json.loads(json.dumps(first.to_dict())) if as_dict else first
+    log = EvidenceLog(tmp_path / "e.jsonl") if tmp_path else None
+    return first, recheck(verifier, stored, log), log
+
+
+def test_recheck_turns_a_settled_refund_into_verified(tmp_path):
+    first, again, log = pending_then(lambda s: s.refunds[1].update(status="succeeded"), tmp_path, as_dict=True)
+    assert again.status is Status.VERIFIED
+    assert again.claim.context["recheck_of"] == first.checked_at
+    assert log.verify_chain()[0] and log.records()[-1]["body"]["status"] == "verified"
+
+
+def test_recheck_catches_a_refund_the_bank_failed():
+    _, again, _ = pending_then(lambda s: s.refunds[1].update(status="failed"))
+    assert again.status is Status.FAILED and [f.field for f in again.findings] == ["status"]
+
+
+def test_recheck_still_pending_stays_unverified():
+    _, again, _ = pending_then(lambda s: None)
+    assert again.status is Status.UNVERIFIED and kinds(again) == [FindingKind.PENDING]
+
+
+def test_recheck_ignores_refunds_created_after_the_first_check():
+    _, again, _ = pending_then(lambda s: (s.refunds[1].update(status="succeeded"), s.refund("pi_1", 500)))
+    assert again.status is Status.VERIFIED
+
+
+def test_recheck_unreachable_and_bad_observed_stay_unverified():
+    first, again, _ = pending_then(lambda s: setattr(s, "down", True))
+    assert again.status is Status.UNVERIFIED and kinds(again) == [FindingKind.UNREACHABLE]
+    assert again.observed == first.observed  # can be queued again
+    verifier = StripeRefundVerifier(MockStripe().client())
+    for bad in ({"created": "re_2"}, {"created": [{"no_id": 1}]}, {"other": 1}):
+        assert verifier.recheck(REFUND, bad).status is Status.UNVERIFIED
+
+
+def test_recheck_reads_stripe_once():
+    stripe = MockStripe()
+    verifier = StripeRefundVerifier(stripe.client())
+    with watch(verifier, REFUND) as watched:
+        stripe.refund("pi_1", 2500, status="pending")
+    stripe.refunds[0]["status"] = "succeeded"
+    reads = []
+    real = verifier._refunds
+    verifier._refunds = lambda pi: (reads.append(pi), stripe.refund("pi_1", 700), real(pi))[2]  # a refund lands mid-check
+    assert recheck(verifier, watched.verdict).status is Status.VERIFIED and reads == ["pi_1"]
+
+
+def test_recheck_of_a_recheck_keeps_the_first_time():
+    first, again, _ = pending_then(lambda s: None)
+    assert recheck(StripeRefundVerifier(MockStripe().client()), again).claim.context["recheck_of"] == first.checked_at
+
+
+def test_recheck_never_overturns_a_verified_or_failed_verdict():
+    verifier = StripeRefundVerifier(MockStripe().client())
+    for verdict in (stripe_run(lambda s: s.refund("pi_1", 2500)), stripe_run(lambda s: None)):
+        with pytest.raises(ValueError):
+            recheck(verifier, verdict)
+        with pytest.raises(ValueError):
+            recheck(verifier, verdict.to_dict())
 
 
 def test_webhook_with_a_bad_url_never_breaks_the_agent():

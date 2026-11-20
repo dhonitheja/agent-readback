@@ -39,7 +39,7 @@ flowchart LR
 
 ## What is tested and what is not
 
-Version 0.2.2. All 119 offline tests pass with the optional test dependencies
+Version 0.2.2. All 128 offline tests pass with the optional test dependencies
 installed. A separate public HAPI FHIR R4
 sandbox run verified 10 scripted operations (6 bookings, 1 reschedule,
 3 cancellations); this is a compatibility smoke test, not production validation.
@@ -127,6 +127,24 @@ with watch(verifier, probe, log, settle_attempts=3, on_verdict=[WebhookAlert(ALE
 if not w.verdict.ok:
     escalate_to_human(w.verdict)
 ```
+
+### Re-checking later: refunds the bank has not settled
+
+A Stripe refund that matches the claim but is still `pending` gives an
+`unverified` verdict with a `pending` finding. Keep `verdict.to_dict()` in your
+own queue and judge it again once the bank has had time:
+
+```python
+from agent_readback import recheck
+
+again = recheck(StripeRefundVerifier(client), stored_dict, log)   # verified, failed, or still pending
+```
+
+Only the refunds seen at the first check are judged; refunds created since
+then are not counted. The new verdict is logged with
+`context["recheck_of"]` set to the first `checked_at`. A verified or failed
+verdict is never re-checked. The stored dict holds the observed refund values,
+so protect the queue like the system of record itself.
 
 ### One-line adapters: MCP tool calls and LangGraph nodes
 
@@ -269,8 +287,8 @@ restricted key with `refunds: read`, a database role with `SELECT` only).
 
 Known limits: `Claim.context` is stored as given; `Verdict.observed` holds
 real values in memory (do not print it in production logs); a pending Stripe
-refund is `unverified` until it settles; no rate limiting on the verifier's
-own reads. No external security or compliance review has been done.
+refund is `unverified` until you `recheck` it, and scheduling that is up to
+you; no rate limiting on the verifier's own reads. No external security or compliance review has been done.
 
 ## Repeat sandbox validation
 

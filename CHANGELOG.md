@@ -12,6 +12,21 @@ All notable changes to `agent-readback`. Dates are UTC.
   --anchor FILE` or `--head HASH` reports BROKEN when the anchored head is no
   longer in the log. A failing anchor warns and sets `log.anchor_error`
   instead of breaking the agent.
+- `recheck(verifier, verdict, log)` judges an `unverified` verdict again
+  later; the result is logged with `context["recheck_of"]`. Verified and
+  failed verdicts are never re-checked. `StripeRefundVerifier.recheck`
+  judges only the refunds seen at the first check.
+- `FindingKind.PENDING`: a Stripe refund that matches but has not settled.
+
+### Changed
+
+- A pending Stripe refund's finding is `pending` (was `unreachable`), and the
+  verdict keeps the new refunds in `observed` so it can be re-checked.
+
+### Fixed
+
+- A pending Stripe refund with a wrong amount, currency or a second refund is
+  now `failed`; before, being pending hid the mismatch as `unverified`.
 
 ## 0.2.2 — 2026-11-19
 

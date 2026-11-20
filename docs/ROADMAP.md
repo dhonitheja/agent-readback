@@ -31,7 +31,7 @@ examples: run_eval harness, LangGraph agent, mock FHIR server, Stripe sandbox ru
 | 3 | ~~CI on GitHub Actions: Linux and Windows; MCP 1.x and 2.x~~ (done, PR #4; LangGraph 1.x only, since the `langgraph` extra requires >=1.0) | tests | Both MCP majors were only checked by hand | 1 |
 | 4 | FHIR verifier with authenticated read-only access on a test EHR (OAuth read scope) | verifiers | The core promise, independent verifier credentials, is untested against a real auth server | test EHR access |
 | 5 | SQL verifier on Postgres with a `SELECT`-only role | verifiers | Only SQLite is tested | Postgres instance |
-| 6 | Re-check pending Stripe refunds later instead of leaving them `unverified` | core, verifiers | Known limit | — |
+| 6 | ~~Re-check pending Stripe refunds later instead of leaving them `unverified`~~ (done: `recheck()`, `FindingKind.PENDING`) | core, verifiers | Known limit | — |
 | 7 | ~~Anchor the evidence-log head hash outside the log~~ (done: `anchor=`, `FileAnchor`, `verify-log --anchor/--head`) | evidence | Dropping the newest records is undetectable from the file alone | — |
 | 8 | Rate-limit the verifier's own reads | verifiers | Known limit; matters under production load | — |
 | 9 | Real-model eval on the LangGraph agent, 50+ runs per model | examples | The 3-run smoke test cannot compare models | API keys |
