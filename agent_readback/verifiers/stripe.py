@@ -64,7 +64,9 @@ class StripeRefundVerifier:
             now = self._refunds(claim.expected["payment_intent"])
         except (httpx.HTTPError, KeyError, ValueError) as error:
             return unreachable(f"could not read Stripe: {error}")
+        return self._judge(claim, before, now)
 
+    def _judge(self, claim: Claim, before: set[str], now: dict[str, dict[str, Any]]) -> Verdict:
         created = [item for key, item in now.items() if key not in before]
         if not created:
             finding = Finding(FindingKind.MISSING, "no new refund exists for this payment")
@@ -89,9 +91,13 @@ class StripeRefundVerifier:
 
     def recheck(self, claim: Claim, observed: dict[str, Any]) -> Verdict:
         """Judge the refunds seen at the first check again; refunds created since then are not counted."""
+        if claim.action != CREATE:
+            return Verdict(Status.UNVERIFIED, claim, (Finding(FindingKind.UNREACHABLE, f"unknown action {claim.action!r}"),))
         try:
             first = {item["id"] for item in observed["created"]}
-            now = set(self._refunds(claim.expected["payment_intent"]))
+            now = self._refunds(claim.expected["payment_intent"])  # one read, so nothing slips in between
         except (httpx.HTTPError, KeyError, TypeError, ValueError) as error:
-            return Verdict(Status.UNVERIFIED, claim, (Finding(FindingKind.UNREACHABLE, f"could not re-check Stripe: {error}"),))
-        return self.check(claim, now - first)
+            # Keep `observed` so the caller can queue this verdict again.
+            finding = Finding(FindingKind.UNREACHABLE, f"could not re-check Stripe: {error}")
+            return Verdict(Status.UNVERIFIED, claim, (finding,), observed)
+        return self._judge(claim, set(now) - first, now)

@@ -153,7 +153,8 @@ def recheck(
         status, claim, observed, first = verdict.status, verdict.claim, verdict.observed, verdict.checked_at
     if status is not Status.UNVERIFIED:
         raise ValueError(f"only unverified verdicts are re-checked, not {status.value!r}")
-    claim = replace(claim, context={**claim.context, "recheck_of": first})
+    # A recheck of a recheck still points at the very first check.
+    claim = replace(claim, context={"recheck_of": first, **claim.context})
     again = getattr(verifier, "recheck", None)
     if again is None or not observed:
         new = Verdict(Status.UNVERIFIED, claim, (Finding(FindingKind.UNREACHABLE, "nothing to re-check"),))

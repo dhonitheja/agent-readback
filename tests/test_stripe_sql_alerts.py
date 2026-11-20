@@ -207,11 +207,29 @@ def test_recheck_ignores_refunds_created_after_the_first_check():
 
 
 def test_recheck_unreachable_and_bad_observed_stay_unverified():
-    _, again, _ = pending_then(lambda s: setattr(s, "down", True))
+    first, again, _ = pending_then(lambda s: setattr(s, "down", True))
     assert again.status is Status.UNVERIFIED and kinds(again) == [FindingKind.UNREACHABLE]
+    assert again.observed == first.observed  # can be queued again
     verifier = StripeRefundVerifier(MockStripe().client())
     for bad in ({"created": "re_2"}, {"created": [{"no_id": 1}]}, {"other": 1}):
         assert verifier.recheck(REFUND, bad).status is Status.UNVERIFIED
+
+
+def test_recheck_reads_stripe_once():
+    stripe = MockStripe()
+    verifier = StripeRefundVerifier(stripe.client())
+    with watch(verifier, REFUND) as watched:
+        stripe.refund("pi_1", 2500, status="pending")
+    stripe.refunds[0]["status"] = "succeeded"
+    reads = []
+    real = verifier._refunds
+    verifier._refunds = lambda pi: (reads.append(pi), stripe.refund("pi_1", 700), real(pi))[2]  # a refund lands mid-check
+    assert recheck(verifier, watched.verdict).status is Status.VERIFIED and reads == ["pi_1"]
+
+
+def test_recheck_of_a_recheck_keeps_the_first_time():
+    first, again, _ = pending_then(lambda s: None)
+    assert recheck(StripeRefundVerifier(MockStripe().client()), again).claim.context["recheck_of"] == first.checked_at
 
 
 def test_recheck_never_overturns_a_verified_or_failed_verdict():
