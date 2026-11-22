@@ -152,9 +152,12 @@ def _owner_only(path: Path) -> None:
 class FileAnchor:
     """Keep a log's newest (record count, head hash) in a separate small file.
 
-    Put the file where the log writer cannot rewrite it: another volume or
-    account, a synced or append-only store. Whoever can edit both the log and
-    the anchor can still truncate undetected.
+    The log writer replaces this file after every append, so on its own it is
+    only as safe as the log. Check against a copy the writer cannot rewrite (a
+    synced replica whose history it cannot erase, a backup), or pass an anchor
+    callable that appends to an independent append-only store instead. Whoever
+    can edit both the log and the anchor copy you check against can still
+    truncate undetected.
     """
 
     def __init__(self, path: str | Path) -> None:

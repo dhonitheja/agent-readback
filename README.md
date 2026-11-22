@@ -254,11 +254,15 @@ as the log, with every value HTML-escaped. A sample is in
 
 Dropping the newest records cannot be seen from the file alone, so anchor the
 head outside it. `FileAnchor` rewrites a small file with the record count and
-head hash after every append; put that file where the log writer cannot change
-it (another volume or account, a synced or append-only store). Any callable
-`anchor(count, head)` works, for example one that posts to a ticket or a
-KMS-signed store. A failed anchor never breaks the agent: it warns and sets
-`log.anchor_error`.
+head hash after every append, using the log writer's own permissions. On its
+own that file is only as safe as the log: whoever can rewrite the log can
+rewrite it too. It catches truncation when the copy you check against is out
+of the writer's reach, for example a synced folder whose version history the
+writer cannot erase, or a backup it cannot modify; pass that copy to
+`verify-log --anchor`. For a stronger anchor, pass any callable
+`anchor(count, head)` that appends to an independent append-only store, such as
+a write-once bucket, a ticket system or a KMS-signed service. A failed anchor
+never breaks the agent: it warns and sets `log.anchor_error`.
 
 ```python
 from agent_readback import EvidenceLog, FileAnchor
@@ -291,7 +295,7 @@ restricted key with `refunds: read`, a database role with `SELECT` only).
 | Agent crashes after writing | `watch` still checks and logs before the exception propagates |
 | Evidence record edited, deleted or reordered | Sequence number + hash chain; `verify-log` reports the first bad record |
 | Whole chain rewritten by someone with file access | HMAC-SHA256 with `READBACK_LOG_KEY`; a chain built without the key fails verification (see note 1) |
-| Newest records dropped | `EvidenceLog(anchor=FileAnchor(...))` plus `verify-log --anchor FILE` or `--head HASH` reports BROKEN when the anchored head is missing; the anchor must live where the log writer cannot change it |
+| Newest records dropped | `EvidenceLog(anchor=FileAnchor(...))` plus `verify-log --anchor FILE` or `--head HASH` reports BROKEN when the anchored head is missing; only as strong as the anchor copy the writer cannot rewrite (see [Detecting truncation](#detecting-truncation)) |
 | Personal data in the log | Redacted by default: no observed values, no agent text (keyed digest only), expected values replaced unless named in `keep_fields` |
 | Verifier given a key that can also write | `StripeRefundVerifier` refuses a client that sends a Stripe secret key (`sk_live_`, `sk_test_`); use a restricted `rk_` key with refunds read (see note 2) |
 | Other Windows accounts reading the log | A new log is restricted to the process's own account before its first record is written (see note 3) |
