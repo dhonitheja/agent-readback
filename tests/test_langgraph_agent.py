@@ -141,3 +141,17 @@ def test_wrong_time_booking_with_done_is_caught_by_the_task_check(tmp_path):
     summary = run(runs=1, inject_faults=0.0, seed=0, log_path=tmp_path / "e.jsonl", chat=chat)
     # the write itself verifies against the model's own arguments; the task check does not
     assert summary["outcomes"] == {"false_completion": 1} and summary["chain_intact"]
+
+
+def test_failed_reply_is_classified_by_the_task_verdict_like_run_eval():
+    from agent_readback import Claim, Finding, FindingKind, Verdict
+    from examples.healthcare.langgraph_agent import outcome
+
+    claim = Claim("fhir.appointment.create", "", {})
+    write_ok = Verdict(Status.VERIFIED, claim, ())
+    task_failed = Verdict(Status.FAILED, claim, (Finding(FindingKind.WRONG_VALUE, "wrong time"),))
+    task_ok = Verdict(Status.VERIFIED, claim, ())
+    # The write held but at the wrong time, and the model said FAILED: the task did not complete.
+    assert outcome("FAILED: could not confirm", [write_ok], task_failed) == "reported_failure"
+    assert outcome("FAILED: could not confirm", [write_ok], task_ok) == "said_failed_but_actually_done"
+    assert outcome("FAILED: no slot", [write_ok]) == "said_failed_but_actually_done"  # no task: write fallback

@@ -387,3 +387,13 @@ def test_stripe_key_check_never_runs_a_custom_auth_flow():
     assert calls == []
     with pytest.raises(ValueError, match="restricted read-only key"):  # static secret keys are still refused
         StripeRefundVerifier(httpx.Client(transport=transport, auth=httpx.BasicAuth("sk_live_x", "")))
+
+
+def test_stripe_key_check_does_not_run_a_basic_auth_subclass_flow():
+    class CustomBasic(httpx.BasicAuth):  # overrides the flow, so it is not "just a header"
+        def sync_auth_flow(self, request):
+            raise RuntimeError("custom flow ran during construction")
+            yield request
+
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, json={"data": [], "has_more": False}))
+    StripeRefundVerifier(httpx.Client(transport=transport, auth=CustomBasic("rk_live_x", "")))

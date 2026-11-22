@@ -31,7 +31,8 @@ All notable changes to `agent-readback`. Dates are UTC.
   `PATH` are never used, so an environment naming another account cannot
   lock the writer out of its own log. A failure (including an `icacls` that
   prints nothing) warns and the log is still written.
-- The `sk_` key check inspects only static keys (httpx `BasicAuth` or a
+- The `sk_` key check inspects only static keys (exactly httpx `BasicAuth`, not
+  a subclass, or a
   Bearer header); a custom auth flow is never run during construction.
 - `SqlRowVerifier` validates `placeholder`: it is spliced into the query
   text, so a value such as `? OR 1=1` used to reach the database.
@@ -65,6 +66,11 @@ All notable changes to `agent-readback`. Dates are UTC.
 
 ### Fixed
 
+- `RateLimit(..., max_wait=0)` no longer refuses a read inside a fresh burst
+  because of floating-point rounding (a wait under 1 ns counts as none).
+- The LangGraph example classifies a `FAILED` reply by the task verdict when
+  there is one, as `run_eval` does: writes that held at the wrong time are
+  `reported_failure`, not `said_failed_but_actually_done`.
 - A pending Stripe refund with a wrong amount, currency or a second refund is
   now `failed`; before, being pending hid the mismatch as `unverified`.
 - The example `.env` loader warns when the file cannot be read instead of

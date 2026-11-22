@@ -61,7 +61,8 @@ class RateLimit:
         with self._lock:  # reserve a slot in order; sleep outside the lock
             now = self._clock()
             start = max(self._next_free, now)
-            wait = max(0.0, start - (self.burst - 1) * self.interval - now)
+            wait = start - (self.burst - 1) * self.interval - now
+            wait = wait if wait > 1e-9 else 0.0  # float rounding must not refuse a read inside a fresh burst
             if self.max_wait is not None and wait > self.max_wait:
                 raise RateLimitTimeout(f"read rate limit: would wait {wait:.2f}s, more than max_wait {self.max_wait}s")
             self._next_free = start + self.interval

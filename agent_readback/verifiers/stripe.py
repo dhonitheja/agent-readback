@@ -37,7 +37,7 @@ def _api_key(client: httpx.Client) -> str | None:
     and its key counts as unknown.
     """
     request = client.build_request("GET", "/v1/refunds")
-    if isinstance(client.auth, httpx.BasicAuth):  # e.g. httpx.Client(auth=(key, ""))
+    if type(client.auth) is httpx.BasicAuth:  # exactly; a subclass may override the flow. e.g. auth=(key, "")
         request = next(client.auth.sync_auth_flow(request))
     scheme, _, value = request.headers.get("Authorization", "").partition(" ")
     if scheme.lower() == "basic":

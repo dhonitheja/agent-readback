@@ -172,3 +172,12 @@ def test_limiting_the_same_target_twice_is_refused():
     connect = limit_reads(lambda: None, limit)
     with pytest.raises(ValueError, match="already rate-limited"):
         limit_reads(connect, limit)
+
+
+def test_float_rounding_never_refuses_a_read_inside_a_fresh_burst():
+    for per_second in (0.3, 0.7, 3, 7, 9, 13, 30, 1000):
+        for burst in (1, 9, 10, 15, 25, 40):
+            limit = RateLimit(per_second, burst, clock=lambda: 100.0, sleep=lambda s: None, max_wait=0)
+            assert [limit.acquire() for _ in range(burst)] == [0.0] * burst, (per_second, burst)
+            with pytest.raises(RateLimitTimeout):
+                limit.acquire()  # one more than the burst still waits, so is still refused

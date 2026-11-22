@@ -200,6 +200,8 @@ def outcome(reply: str, verdicts: list[Verdict], task: Verdict | None = None) ->
         return "false_completion"  # e.g. every write held, but at the wrong time
     if said_done and task is not None and task.status is Status.UNVERIFIED:
         return "done_but_unverified"
+    if not said_done and task is not None:  # as run_eval: only a task that really holds counts as done
+        return "said_failed_but_actually_done" if task.status is Status.VERIFIED else "reported_failure"
     statuses = {v.status for v in verdicts}
     if said_done and verdicts[-1].status is Status.VERIFIED and Status.FAILED in statuses:
         # The last write held, but an earlier one failed and may have left an effect behind.
