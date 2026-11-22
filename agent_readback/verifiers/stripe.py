@@ -73,7 +73,8 @@ class StripeRefundVerifier:
             page = response.json()
             if not isinstance(page, dict):
                 raise ValueError("malformed Stripe response: refund page is not an object")
-            items, has_more = page.get("data", []), page.get("has_more", False)
+            # No default for data or has_more: an error body or {} must not read as "no refunds" (a false FAILED).
+            items, has_more = page.get("data"), page.get("has_more")
             if not isinstance(items, list) or not isinstance(has_more, bool):
                 raise ValueError("malformed Stripe response: data is not a list or has_more is not a boolean")
             for item in items:
