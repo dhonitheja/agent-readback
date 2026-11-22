@@ -39,7 +39,7 @@ flowchart LR
 
 ## What is tested and what is not
 
-Version 0.3.0. All 154 offline tests pass with the optional test dependencies
+Version 0.3.0. All 155 offline tests pass with the optional test dependencies
 installed. A separate public HAPI FHIR R4
 sandbox run verified 10 scripted operations (6 bookings, 1 reschedule,
 3 cancellations); this is a compatibility smoke test, not production validation.
@@ -301,7 +301,7 @@ restricted key with `refunds: read`, a database role with `SELECT` only).
 | Newest records dropped | Not detectable from the file alone. `EvidenceLog(anchor=FileAnchor(...))` records the count and head after every append; `verify-log --anchor FILE` or `--head HASH` reports BROKEN when the anchored head is missing. The anchor must live where the log writer cannot change it |
 | Personal data in the log | Redacted by default: no observed values, no agent text (keyed digest only), expected values replaced unless named in `keep_fields` |
 | Verifier given a key that can also write | `StripeRefundVerifier` refuses a client that sends a secret key (`sk_live_` or `sk_test_`, Basic or Bearer); use a restricted `rk_` key with refunds read. It checks the prefix of static keys only (httpx `BasicAuth` or a Bearer header; custom auth flows are never run during the check and their keys are not seen) and cannot prove an `rk_` key is read-only |
-| Other Windows accounts reading the log | Mode `0600` does nothing on Windows, so a new log is created empty, has inherited access removed with `icacls` and is granted to this process's own SID (read from its access token with `whoami`; System32 located with `GetSystemDirectoryW`; `USERNAME`, `SystemRoot` and `PATH` are never used), all before the first record is written. If that fails the log is still written and a `RuntimeWarning` says so. A process that opens the file in the instant between creation and restriction keeps its handle: put logs in a folder only you can access. Logs created before this change and anchor files keep their folder's access |
+| Other Windows accounts reading the log | Mode `0600` does nothing on Windows, so a new log is created empty, has every existing access entry (explicit and inherited) removed with `icacls` and is granted to this process's own SID (read from its access token with `whoami`; System32 located with `GetSystemDirectoryW`; `USERNAME`, `SystemRoot` and `PATH` are never used), all before the first record is written. If that fails the log is still written and a `RuntimeWarning` says so. A process that opens the file in the instant between creation and restriction keeps its handle: put logs in a folder only you can access. Logs created before this change and anchor files keep their folder's access |
 | Alert spoofing | `WebhookAlert` signs every body with `X-Readback-Signature: sha256=<HMAC>` when `READBACK_ALERT_KEY` is set; receivers must check it |
 | Alert receiver forging the log | The alert key is separate from `READBACK_LOG_KEY` and the log key is never used for alerts. `WebhookAlert` refuses a key equal to `READBACK_LOG_KEY` or to a key passed to any `EvidenceLog` in the same process, at creation and before each send. It cannot see keys used only by other processes: keep explicit log and alert keys separate yourself |
 | Server-supplied paging link sends the verifier's token elsewhere | Each FHIR next link is resolved the way httpx will send it (so `//host/x` and similar forms count) and must stay on the client's scheme, host and port; anything else is `unverified` and is never requested |

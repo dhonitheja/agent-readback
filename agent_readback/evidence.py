@@ -135,9 +135,14 @@ def _owner_only(path: Path) -> None:
             if not _SID.match(sid):
                 failed = f"could not read the current user's SID: {(who.stderr or who.stdout).strip()!r}"
             else:
-                result = run("icacls.exe", str(path), "/inheritance:r", "/grant:r", f"*{sid}:F")
-                if result.returncode != 0:  # icacls can fail without printing anything
-                    failed = (result.stderr or result.stdout).strip() or f"icacls exited with {result.returncode}"
+                # /reset drops explicit entries (some hosts, e.g. GitHub's Windows runners,
+                # put explicit ones on new files); /inheritance:r then drops inherited ones,
+                # leaving only this SID. The file is still empty while this runs.
+                for step in (("/reset",), ("/inheritance:r", "/grant:r", f"*{sid}:F")):
+                    result = run("icacls.exe", str(path), *step)
+                    if result.returncode != 0:  # icacls can fail without printing anything
+                        failed = (result.stderr or result.stdout).strip() or f"icacls exited with {result.returncode}"
+                        break
     except (OSError, subprocess.SubprocessError) as error:
         failed = str(error)
     if failed:

@@ -440,3 +440,22 @@ def test_icacls_failing_without_output_still_warns(tmp_path, monkeypatch):
     with pytest.warns(RuntimeWarning, match="icacls exited with 1"):
         EvidenceLog(path).append(verdict(0))
     assert EvidenceLog(path).verify_chain() == (True, None)
+
+
+def test_explicit_access_entries_on_a_new_log_are_removed_too(tmp_path):
+    import os
+    import subprocess
+
+    if os.name != "nt":
+        pytest.skip("owner-only access uses icacls on Windows only")
+    from agent_readback.evidence import _owner_only
+
+    path = tmp_path / "log.jsonl"
+    path.touch()
+    icacls = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32", "icacls.exe")
+    # An explicit (not inherited) grant, as GitHub's Windows runners leave on new files.
+    subprocess.run([icacls, str(path), "/grant", "*S-1-5-32-545:R"], capture_output=True, check=True)  # BUILTIN\Users
+    _owner_only(path)
+    acl = subprocess.run([icacls, str(path)], capture_output=True, text=True, check=True).stdout
+    grants = [line for line in acl.splitlines() if ":(" in line]
+    assert len(grants) == 1 and "BUILTIN\\Users" not in acl, acl  # the path itself contains "Users"

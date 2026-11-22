@@ -23,7 +23,8 @@ All notable changes to `agent-readback`. Dates are UTC.
 ### Security
 
 - On Windows, where mode `0600` does nothing, a new evidence log is created
-  empty, has inherited access removed with `icacls` and is granted only to the
+  empty, has every existing access entry (explicit and inherited) removed with
+  `icacls` and is granted only to the
   SID of the process's own access token (read with `whoami`), all before the
   first record is written. `icacls` and `whoami` are run from the directory
   `GetSystemDirectoryW` returns; `USERNAME`, `USERDOMAIN`, `SystemRoot` and
