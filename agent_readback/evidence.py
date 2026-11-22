@@ -152,12 +152,15 @@ def _owner_only(path: Path) -> None:
 class FileAnchor:
     """Keep a log's newest (record count, head hash) in a separate small file.
 
-    The log writer replaces this file after every append, so on its own it is
-    only as safe as the log. Check against a copy the writer cannot rewrite (a
-    synced replica whose history it cannot erase, a backup), or pass an anchor
-    callable that appends to an independent append-only store instead. Whoever
-    can edit both the log and the anchor copy you check against can still
-    truncate undetected.
+    The log writer tries to replace this file after every append, so on its own
+    it is only as safe as the log. Check against a copy that the writer cannot
+    rewrite and that holds the current head, such as a synced replica whose
+    history it cannot erase; an older copy (a backup) only proves the log still
+    reaches that older head. Or pass an anchor callable that appends to an
+    independent append-only store instead. A failed replacement does not stop
+    the append: it warns and sets ``EvidenceLog.anchor_error``, so monitor that
+    if you rely on the anchor. Whoever can edit both the log and the anchor copy
+    you check against can still truncate undetected.
     """
 
     def __init__(self, path: str | Path) -> None:

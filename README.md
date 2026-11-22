@@ -257,12 +257,15 @@ head outside it. `FileAnchor` rewrites a small file with the record count and
 head hash after every append, using the log writer's own permissions. On its
 own that file is only as safe as the log: whoever can rewrite the log can
 rewrite it too. It catches truncation when the copy you check against is out
-of the writer's reach, for example a synced folder whose version history the
-writer cannot erase, or a backup it cannot modify; pass that copy to
-`verify-log --anchor`. For a stronger anchor, pass any callable
-`anchor(count, head)` that appends to an independent append-only store, such as
-a write-once bucket, a ticket system or a KMS-signed service. A failed anchor
-never breaks the agent: it warns and sets `log.anchor_error`.
+of the writer's reach and holds the current head, for example a synced folder
+whose version history the writer cannot erase; pass that copy to
+`verify-log --anchor`. An older copy, such as a backup, only proves the log
+still reaches the head it recorded: records added since can be dropped
+undetected. For a stronger anchor, pass any callable `anchor(count, head)` that
+appends to an independent append-only store, such as a write-once bucket, a
+ticket system or a KMS-signed service. A failed anchor never breaks the agent:
+it warns and sets `log.anchor_error`, so monitor that if you rely on the
+anchor.
 
 ```python
 from agent_readback import EvidenceLog, FileAnchor
