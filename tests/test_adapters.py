@@ -169,6 +169,70 @@ def test_mcp_stdio_tool_write_is_verified(tmp_path):
     assert verdicts[0].claim.agent_said == "Booked."
 
 
+def test_mcp_streamable_http_tool_write_is_verified_and_a_false_claim_fails(tmp_path):
+    pytest.importorskip("mcp")
+    import socket
+    import subprocess
+
+    from anyio import fail_after, sleep
+    from mcp import ClientSession
+    from mcp.client.streamable_http import streamable_http_client
+
+    from agent_readback import mcp_text
+
+    database = tmp_path / "appointments.sqlite"
+    with closing(sqlite3.connect(database)) as connection:
+        connection.execute("CREATE TABLE appointments (patient TEXT PRIMARY KEY, practitioner TEXT, start TEXT, end TEXT)")
+    verifier = SqlRowVerifier(
+        lambda: sqlite3.connect(database.as_uri() + "?mode=ro", uri=True), "appointments", "patient", placeholder="?"
+    )
+    with socket.socket() as probe:  # ponytail: free port; tiny race until the server binds it
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    server_log = tmp_path / "server.log"
+    with server_log.open("w") as log_file:
+        process = subprocess.Popen(
+            [sys.executable, str(Path(__file__).with_name("mcp_stdio_server.py")), str(database), str(port)],
+            stdout=subprocess.DEVNULL, stderr=log_file,
+        )
+    honest = dict(ARGS, patient="Patient/http-1")
+    lied_about = dict(ARGS, patient="Patient/http-2")
+    verdicts = []
+
+    async def scenario():
+        with fail_after(30):  # generous ceiling for a cold server start; normal run is ~2s
+            while True:  # wait until uvicorn listens
+                try:
+                    with socket.create_connection(("127.0.0.1", port), timeout=0.2):
+                        break
+                except OSError:
+                    assert process.poll() is None, server_log.read_text()
+                    await sleep(0.1)
+            async with streamable_http_client(f"http://127.0.0.1:{port}/mcp") as streams:
+                async with ClientSession(streams[0], streams[1]) as session:  # 1.x yields 3 values, 2.x yields 2
+                    await session.initialize()
+
+                    def claim(name, arguments):
+                        expected = dict(arguments)
+                        if arguments["patient"] == lied_about["patient"]:
+                            expected["practitioner"] = "Practitioner/someone-else"  # what the agent claims, not what it booked
+                        return Claim("sql.row.insert", "", expected)
+
+                    book = watched(session.call_tool, verifier, claim, said=mcp_text, on_verdict=[verdicts.append])
+                    return [await book("book_appointment", honest), await book("book_appointment", lied_about)]
+
+    try:
+        results = asyncio.run(scenario())  # mcp is installed by now: a hang is a real failure, never a skip
+    finally:
+        process.terminate()
+        process.wait(timeout=10)
+
+    assert not any(getattr(r, "isError", getattr(r, "is_error", False)) for r in results)
+    assert [v.status for v in verdicts] == [Status.VERIFIED, Status.FAILED]
+    assert verdicts[0].claim.agent_said == "Booked."
+    assert [f.field for f in verdicts[1].findings] == ["practitioner"]  # read back from the database, not the reply
+
+
 def test_langgraph_node(server, tools):
     pytest.importorskip("langgraph")
     from langgraph.graph import END as GRAPH_END

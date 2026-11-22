@@ -17,6 +17,7 @@ Build the client with a restricted, read-only Stripe key, for example:
 
 from __future__ import annotations
 
+import base64
 from typing import Any
 
 import httpx
@@ -28,8 +29,37 @@ FIELDS = ("id", "amount", "currency", "status", "payment_intent", "charge")
 MAX_PAGES = 50  # 5000 refunds on one payment intent; a server that pages forever gets `unverified`, not a hang
 
 
+def _api_key(client: httpx.Client) -> str | None:
+    """The static key the client sends (Basic auth user or Bearer token), or None if unknown.
+
+    Only httpx's own BasicAuth is run: it just sets a header. Any other auth flow
+    could make network calls or need an async client, so it is never invoked here
+    and its key counts as unknown.
+    """
+    request = client.build_request("GET", "/v1/refunds")
+    if type(client.auth) is httpx.BasicAuth:  # exactly; a subclass may override the flow. e.g. auth=(key, "")
+        request = next(client.auth.sync_auth_flow(request))
+    scheme, _, value = request.headers.get("Authorization", "").partition(" ")
+    if scheme.lower() == "basic":
+        try:
+            value = base64.b64decode(value).decode().partition(":")[0]
+        except ValueError:
+            return None
+    return value.strip() or None
+
+
 class StripeRefundVerifier:
     def __init__(self, client: httpx.Client) -> None:
+        # ponytail: prefix check on static keys only. It stops a secret key (which can
+        # also create refunds) passed as Basic auth or a Bearer header, but cannot prove
+        # an rk_ key is read-only (examples/stripe_sandbox.py checks that live) and does
+        # not see keys from custom auth flows or added per request.
+        key = _api_key(client)
+        if key is not None and key.startswith("sk_"):
+            raise ValueError(
+                "StripeRefundVerifier needs a restricted read-only key (rk_...), not a secret key "
+                "(sk_...): a secret key can also create refunds, which defeats the independent check"
+            )
         self.client = client
 
     def _refunds(self, payment_intent: str) -> dict[str, dict[str, Any]]:

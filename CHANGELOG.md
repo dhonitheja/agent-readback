@@ -2,7 +2,40 @@
 
 All notable changes to `agent-readback`. Dates are UTC.
 
-## Unreleased
+## 0.3.0 — 2026-11-21
+
+### Breaking changes
+
+- `StripeRefundVerifier` refuses a client that sends a Stripe secret key
+  (`sk_live_...` or `sk_test_...`, as Basic auth or a Bearer header) with
+  `ValueError`. A secret key can also create refunds, which defeats the
+  independent check; use a restricted read-only `rk_` key.
+- `SqlRowVerifier(..., placeholder=...)` raises `ValueError` for anything
+  other than `?`, `%s`, `:name`, `:1` or `$1`.
+- A pending Stripe refund's finding is `pending` (was `unreachable`), and the
+  verdict keeps the new refunds in `observed` so it can be re-checked.
+- The LangGraph example uses the same outcome labels as `run_eval`:
+  `false_completion` (was `false_completion_caught`), `done_but_unverified`
+  (was `said_done_unverified`), `said_failed_but_actually_done` (was
+  `said_failed_but_verified`) and `reported_failure` (was
+  `said_failed_and_failed` / `said_failed_unverified`).
+
+### Security
+
+- On Windows, where mode `0600` does nothing, a new evidence log is created
+  empty, has every existing access entry (explicit and inherited) removed with
+  `icacls` and is granted only to the
+  SID of the process's own access token (read with `whoami`), all before the
+  first record is written. `icacls` and `whoami` are run from the directory
+  `GetSystemDirectoryW` returns; `USERNAME`, `USERDOMAIN`, `SystemRoot` and
+  `PATH` are never used, so an environment naming another account cannot
+  lock the writer out of its own log. A failure (including an `icacls` that
+  prints nothing) warns and the log is still written.
+- The `sk_` key check inspects only static keys (exactly httpx `BasicAuth`, not
+  a subclass, or a
+  Bearer header); a custom auth flow is never run during construction.
+- `SqlRowVerifier` validates `placeholder`: it is spliced into the query
+  text, so a value such as `? OR 1=1` used to reach the database.
 
 ### Added
 
@@ -17,16 +50,44 @@ All notable changes to `agent-readback`. Dates are UTC.
   failed verdicts are never re-checked. `StripeRefundVerifier.recheck`
   judges only the refunds seen at the first check.
 - `FindingKind.PENDING`: a Stripe refund that matches but has not settled.
-
-### Changed
-
-- A pending Stripe refund's finding is `pending` (was `unreachable`), and the
-  verdict keeps the new refunds in `observed` so it can be re-checked.
+- Opt-in read limiting: `RateLimit(per_second, burst=1, *, max_wait=None)`
+  (thread-safe token bucket) and `limit_reads(target, limit)`, which applies it
+  to a verifier's `httpx.Client` (every request, paging included) or SQL
+  `connect` callable. A limit only delays reads. With `max_wait`, a read that
+  would wait longer raises `RateLimitTimeout` (a subclass of
+  `httpx.TimeoutException`) at once without using a slot, so the verdict is
+  `unverified` instead of the agent stalling. Limiting the same target twice
+  is refused.
+- Test of `watched()` over MCP Streamable HTTP (local server on 127.0.0.1,
+  MCP 1.x and 2.x): an honest booking is `verified` and a misdescribed one
+  `failed`. `tests/mcp_stdio_server.py DATABASE PORT` serves HTTP.
+- `security` extra (bandit, pip-audit, pinned) and a `security` CI job that
+  fails on any unmarked bandit finding or any known dependency vulnerability.
 
 ### Fixed
 
+- On Windows, output from `whoami`/`icacls` that cannot be decoded (for
+  example a non-ASCII account name in another code page) no longer escapes
+  and stops the first evidence append; it is decoded tolerantly and any
+  failure warns.
+- `RateLimit(..., max_wait=0)` no longer refuses a read inside a fresh burst
+  because of floating-point rounding. A rounding-sized wait counts as none;
+  the cutoff scales with the clock value, since `time.monotonic()` counts
+  from boot and its rounding error grows with uptime.
+- The LangGraph example classifies a `FAILED` reply by the task verdict when
+  there is one, as `run_eval` does: writes that held at the wrong time are
+  `reported_failure`, not `said_failed_but_actually_done`.
 - A pending Stripe refund with a wrong amount, currency or a second refund is
   now `failed`; before, being pending hid the mismatch as `unverified`.
+- The example `.env` loader warns when the file cannot be read instead of
+  ignoring the error.
+
+### Documentation
+
+- README: real-model results for the LangGraph agent (claude-sonnet-5-5,
+  claude-haiku-5-5, gpt-6-luna; 50 runs each, verdicts identical to
+  `run_eval` run for run), MCP 2.x and HTTP coverage, a "Rate limiting the
+  verifier's reads" section, and two new Security model rows.
 
 ## 0.2.2 — 2026-11-19
 

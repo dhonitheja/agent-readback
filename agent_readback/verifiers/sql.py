@@ -23,6 +23,7 @@ from ..core import Claim, Finding, FindingKind, Status, Verdict, compare_fields
 INSERT = "sql.row.insert"
 UPDATE = "sql.row.update"
 _IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)?$")
+_PLACEHOLDER = re.compile(r"^(\?|%s|:[A-Za-z_][A-Za-z0-9_]*|:[1-9][0-9]*|\$[1-9][0-9]*)$")  # DB-API paramstyles
 
 
 def _ident(name: str) -> str:
@@ -36,6 +37,8 @@ class SqlRowVerifier:
         self.connect = connect
         self.table = _ident(table)
         self.key_column = _ident(key_column)
+        if not _PLACEHOLDER.match(placeholder):  # it is spliced into the query text
+            raise ValueError(f"unsafe SQL placeholder: {placeholder!r}")
         self.placeholder = placeholder
 
     def _read(self, expected: dict[str, Any]) -> tuple[dict[str, Any] | None, int]:
@@ -43,12 +46,13 @@ class SqlRowVerifier:
         connection = self.connect()
         try:
             cursor = connection.cursor()
+            # Identifiers and placeholder are pattern-checked; the key value is a bound parameter.
             cursor.execute(
-                f"SELECT {', '.join(columns)} FROM {self.table} WHERE {self.key_column} = {self.placeholder}",
+                f"SELECT {', '.join(columns)} FROM {self.table} WHERE {self.key_column} = {self.placeholder}",  # nosec B608
                 (expected[self.key_column],),
             )
             row = cursor.fetchone()
-            cursor.execute(f"SELECT COUNT(*) FROM {self.table}")
+            cursor.execute(f"SELECT COUNT(*) FROM {self.table}")  # table name pattern-checked  # nosec B608
             count = cursor.fetchone()[0]
         finally:
             connection.close()

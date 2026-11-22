@@ -195,25 +195,28 @@ def outcome(reply: str, verdicts: list[Verdict], task: Verdict | None = None) ->
     said = "done" if said_done else "failed"
     if not verdicts:
         return f"said_{said}_no_write"  # e.g. DONE without ever calling a write tool
+    # Labels match run_eval.py; only said_*_no_write and done_after_failed_write are LangGraph-specific.
     if said_done and task is not None and task.status is Status.FAILED:
-        return "false_completion_caught"  # e.g. every write held, but at the wrong time
+        return "false_completion"  # e.g. every write held, but at the wrong time
     if said_done and task is not None and task.status is Status.UNVERIFIED:
-        return "said_done_unverified"
+        return "done_but_unverified"
+    if not said_done and task is not None:  # as run_eval: only a task that really holds counts as done
+        return "said_failed_but_actually_done" if task.status is Status.VERIFIED else "reported_failure"
     statuses = {v.status for v in verdicts}
     if said_done and verdicts[-1].status is Status.VERIFIED and Status.FAILED in statuses:
         # The last write held, but an earlier one failed and may have left an effect behind.
         return "done_after_failed_write"
-    if Status.FAILED in statuses:
-        return "false_completion_caught" if said_done else "said_failed_and_failed"
     if statuses == {Status.VERIFIED}:
-        return "done_and_verified" if said_done else "said_failed_but_verified"
-    return f"said_{said}_unverified"
+        return "done_and_verified" if said_done else "said_failed_but_actually_done"
+    if said_done:
+        return "false_completion" if Status.FAILED in statuses else "done_but_unverified"
+    return "reported_failure"
 
 
 def run(
     runs: int, inject_faults: float, seed: int, log_path: Path, chat: Any | None = None,
 ) -> dict[str, Any]:
-    rng = random.Random(seed)
+    rng = random.Random(seed)  # seeded for repeatable evals, not security  # nosec B311
     server = MockFhirServer()
     setup = server.client()
     patients, practitioners = seed_people(setup)

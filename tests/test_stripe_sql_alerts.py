@@ -342,3 +342,58 @@ def test_alert_created_before_the_log_takes_its_key_is_not_sent(monkeypatch, tmp
     with watch(StripeRefundVerifier(stripe.client()), REFUND, on_verdict=[alert]):
         pass
     assert sent == [] and "evidence-log key" in str(alert.last_error)
+
+
+def test_stripe_verifier_refuses_a_secret_key_that_could_also_create_refunds():
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, json={"data": [], "has_more": False}))
+    for key in ("sk_live_x", "sk_test_x"):
+        with pytest.raises(ValueError, match="restricted read-only key"):
+            StripeRefundVerifier(httpx.Client(transport=transport, auth=(key, "")))  # Basic, as Stripe documents
+        with pytest.raises(ValueError, match="restricted read-only key"):
+            StripeRefundVerifier(httpx.Client(transport=transport, headers={"Authorization": f"Bearer {key}"}))
+    StripeRefundVerifier(httpx.Client(transport=transport, auth=("rk_live_x", "")))  # restricted key accepted
+    StripeRefundVerifier(httpx.Client(transport=transport))  # no key at all (mocks, custom auth) still works
+
+
+def test_sql_rejects_a_placeholder_that_smuggles_in_sql(tmp_path):
+    path = tmp_path / "orders.db"
+    with closing(sqlite3.connect(path)) as db, db:
+        db.execute("CREATE TABLE orders (id TEXT, total INTEGER)")
+    for hostile in ("? OR 1=1", "?; DROP TABLE orders", "'x' --", ""):
+        with pytest.raises(ValueError, match="unsafe SQL placeholder"):
+            SqlRowVerifier(lambda: sqlite3.connect(path), "orders", "id", placeholder=hostile)
+    for ok in ("?", "%s", ":id", ":1", "$1"):  # every DB-API paramstyle still works
+        SqlRowVerifier(lambda: sqlite3.connect(path), "orders", "id", placeholder=ok)
+    with closing(sqlite3.connect(path)) as db:
+        assert db.execute("SELECT name FROM sqlite_master WHERE name = 'orders'").fetchone()  # table survived
+
+
+def test_stripe_key_check_never_runs_a_custom_auth_flow():
+    calls = []
+
+    class TokenFetchingAuth(httpx.Auth):  # e.g. OAuth: would make a network call per flow
+        def sync_auth_flow(self, request):
+            calls.append("sync")
+            raise RuntimeError("network call during construction")
+            yield request
+
+        async def async_auth_flow(self, request):
+            calls.append("async")
+            yield request
+
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, json={"data": [], "has_more": False}))
+    StripeRefundVerifier(httpx.Client(transport=transport, auth=TokenFetchingAuth()))
+    StripeRefundVerifier(httpx.Client(transport=transport, auth=lambda request: request))  # function auth
+    assert calls == []
+    with pytest.raises(ValueError, match="restricted read-only key"):  # static secret keys are still refused
+        StripeRefundVerifier(httpx.Client(transport=transport, auth=httpx.BasicAuth("sk_live_x", "")))
+
+
+def test_stripe_key_check_does_not_run_a_basic_auth_subclass_flow():
+    class CustomBasic(httpx.BasicAuth):  # overrides the flow, so it is not "just a header"
+        def sync_auth_flow(self, request):
+            raise RuntimeError("custom flow ran during construction")
+            yield request
+
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, json={"data": [], "has_more": False}))
+    StripeRefundVerifier(httpx.Client(transport=transport, auth=CustomBasic("rk_live_x", "")))

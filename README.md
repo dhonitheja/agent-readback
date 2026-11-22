@@ -39,7 +39,7 @@ flowchart LR
 
 ## What is tested and what is not
 
-Version 0.2.2. All 128 offline tests pass with the optional test dependencies
+Version 0.3.0. All 162 offline tests pass with the optional test dependencies
 installed. A separate public HAPI FHIR R4
 sandbox run verified 10 scripted operations (6 bookings, 1 reschedule,
 3 cancellations); this is a compatibility smoke test, not production validation.
@@ -52,9 +52,9 @@ create refunds.
 | FHIR appointment verifier (create, update, cancel) | in-memory mock, incomplete pagination, stale-search regression, off-server next links; public HAPI R4 sandbox smoke test | a production EHR, authenticated read-only isolation |
 | Stripe refund verifier and sandbox runner | mock refunds endpoint; test-key guards; Stripe test mode with a read-only restricted key: success, missing, wrong-amount and duplicate scenarios | live mode, a refund left pending by the bank |
 | SQL row verifier | SQLite, including insert with concurrent deletion | Postgres or any other database |
-| Anthropic and OpenAI-compatible agent loops | Mock responses cover each API's message format, Responses tool-call chaining with and without storage, and a once-per-evaluation warning for a model HTTP 400. Earlier live Anthropic runs (claude-sonnet-5-5 and claude-haiku-5-5, 50 tasks each, 20% injected faults) caught every false completion and matched the scripted baseline run for run. On the same tasks and faults, gpt-6-luna with `--reasoning-effort none` caught all 13 injected faults plus 6 of its own wrong reschedule or cancel values. With `--provider openai-responses --reasoning-effort medium`, it caught all 13 and matched the scripted baseline run for run, both with server-side storage and with `--no-store` (OpenAI echoed `store: false`; encrypted reasoning was sent back each turn instead of `previous_response_id`). | Reasoning efforts other than `none` and `medium` |
+| Anthropic and OpenAI-compatible agent loops | Mock responses cover each API's message format, Responses tool-call chaining with and without storage, and a once-per-evaluation warning for a model HTTP 400. Earlier live Anthropic runs (claude-sonnet-5-5 and claude-haiku-5-5, 50 tasks each, 20% injected faults) caught every false completion and matched the scripted baseline run for run. On the same tasks and faults, gpt-6-luna with `--reasoning-effort none` caught all 13 injected faults plus 6 of its own wrong reschedule or cancel values. With `--provider openai-responses --reasoning-effort medium`, it caught all 13 and matched the scripted baseline run for run, both with server-side storage and with `--no-store` (OpenAI echoed `store: false`; encrypted reasoning was sent back each turn instead of `previous_response_id`). The LangGraph agent (`examples/healthcare/langgraph_agent.py`, 50 tasks per model, seed 7, 20% injected faults) gave the same task verdict and finding kinds as `run_eval` and the scripted baseline in every run for claude-sonnet-5-5, claude-haiku-5-5 and gpt-6-luna (LangChain default reasoning effort); all three evidence chains were intact. Haiku and gpt-6-luna: 37 `done_and_verified`, 13 `false_completion`. Sonnet: 37, 11 and 2 `reported_failure`: in one run whose write the verifier failed, it reported the failure instead of claiming DONE. | Reasoning efforts other than `none` and `medium`; LangGraph with other models |
 | Evidence log, redaction, report, dashboard, webhook | unit tests, including HTML escaping of hostile context values and a BROKEN dashboard for a tampered log | production load |
-| `watched()` adapters | Sync and async functions, including off-loop verifier reads when an async tool raises, a verdict even when an AnyIO cancel scope cancels the tool after it writes, and objects with `async def __call__`. MCP 1.27 `ClientSession` runs against in-memory FastMCP and a local stdio subprocess backed by SQLite. LangGraph 0.2 and 1.2 run a wrapped `StateGraph` node and a wrapped LangChain tool in `ToolNode`, plus a full agent/`ToolNode` loop (`examples/healthcare/langgraph_agent.py`) that catches every false DONE under injected faults. Mock FHIR tests catch injected drop, wrong-time, wrong-practitioner and duplicate faults. | MCP over HTTP, MCP 2.x |
+| `watched()` adapters | Sync and async functions, including off-loop verifier reads when an async tool raises, a verdict even when an AnyIO cancel scope cancels the tool after it writes, and objects with `async def __call__`. MCP 1.30 and 2.3 `ClientSession` run against in-memory FastMCP, a local stdio subprocess, and the same server over Streamable HTTP on 127.0.0.1, both backed by SQLite; over HTTP a booking the agent misdescribes is `failed` on the field read back from the database. LangGraph 0.2 and 1.2 run a wrapped `StateGraph` node and a wrapped LangChain tool in `ToolNode`, plus a full agent/`ToolNode` loop (`examples/healthcare/langgraph_agent.py`) that catches every false DONE under injected faults. Mock FHIR tests catch injected drop, wrong-time, wrong-practitioner and duplicate faults. | MCP over HTTP to a remote host, with TLS or auth |
 
 No security or compliance review has been done.
 
@@ -191,6 +191,29 @@ python -m examples.healthcare.langgraph_agent --provider openai --model gpt-6-lu
 A 3-run smoke test with each model (2026-11-19, 30% injected faults) gave
 2 verified and 1 false DONE caught per model. Too small to compare models.
 
+### Rate limiting the verifier's reads
+
+Every verifier reads through the client or `connect` callable you give it, so
+the limit goes there. It is opt-in:
+
+```python
+from agent_readback import RateLimit, limit_reads
+
+limit = RateLimit(per_second=5, burst=10, max_wait=2.0)   # one limit per quota, shared
+fhir = FhirAppointmentVerifier(limit_reads(httpx.Client(...), limit))   # every request, paging included
+sql = SqlRowVerifier(limit_reads(connect, limit), "orders", "id")      # every connection
+```
+
+- A limit only delays reads, so it never turns a verdict into `failed`.
+- With `max_wait`, a read that would wait longer raises `RateLimitTimeout` at
+  once instead of stalling the agent; verifiers report it as `unverified`.
+  It subclasses `httpx.TimeoutException`, so do not wrap verifier calls in an
+  automatic retry-on-timeout: catch `RateLimitTimeout` first and let it stand.
+- Limiting the same client or `connect` twice is refused (it would halve the
+  rate); share one `RateLimit` across clients instead.
+- A 429 the server still sends is a read error, so `unverified`. It is not
+  retried.
+
 ## Verifiers
 
 | Verifier | Actions | Catches |
@@ -277,18 +300,21 @@ restricted key with `refunds: read`, a database role with `SELECT` only).
 | Whole chain rewritten by someone with file access | HMAC-SHA256 with `READBACK_LOG_KEY`; a chain built without the key fails verification. Without the key, an OK is labelled `UNKEYED` (not forgery-proof); `--require-key` makes audits fail instead. Keyed records carry `"mac": "hmac-sha256"`, so a keyed log checked without its key says so rather than "edited" |
 | Newest records dropped | Not detectable from the file alone. `EvidenceLog(anchor=FileAnchor(...))` records the count and head after every append; `verify-log --anchor FILE` or `--head HASH` reports BROKEN when the anchored head is missing. The anchor must live where the log writer cannot change it |
 | Personal data in the log | Redacted by default: no observed values, no agent text (keyed digest only), expected values replaced unless named in `keep_fields` |
+| Verifier given a key that can also write | `StripeRefundVerifier` refuses a client that sends a secret key (`sk_live_` or `sk_test_`, Basic or Bearer); use a restricted `rk_` key with refunds read. It checks the prefix of static keys only (httpx `BasicAuth` or a Bearer header; custom auth flows are never run during the check and their keys are not seen) and cannot prove an `rk_` key is read-only |
+| Other Windows accounts reading the log | Mode `0600` does nothing on Windows, so a new log is created empty, has every existing access entry (explicit and inherited) removed with `icacls` and is granted to this process's own SID (read from its access token with `whoami`; System32 located with `GetSystemDirectoryW`; `USERNAME`, `SystemRoot` and `PATH` are never used), all before the first record is written. If that fails the log is still written and a `RuntimeWarning` says so. A process that opens the file in the instant between creation and restriction keeps its handle: put logs in a folder only you can access. Logs created before this change and anchor files keep their folder's access |
 | Alert spoofing | `WebhookAlert` signs every body with `X-Readback-Signature: sha256=<HMAC>` when `READBACK_ALERT_KEY` is set; receivers must check it |
 | Alert receiver forging the log | The alert key is separate from `READBACK_LOG_KEY` and the log key is never used for alerts. `WebhookAlert` refuses a key equal to `READBACK_LOG_KEY` or to a key passed to any `EvidenceLog` in the same process, at creation and before each send. It cannot see keys used only by other processes: keep explicit log and alert keys separate yourself |
 | Server-supplied paging link sends the verifier's token elsewhere | Each FHIR next link is resolved the way httpx will send it (so `//host/x` and similar forms count) and must stay on the client's scheme, host and port; anything else is `unverified` and is never requested |
 | Evidence log overwritten by the dashboard | `readback dashboard` refuses an output path that is the log itself or any existing `.jsonl` |
 | Hostile or broken server pages forever | FHIR and Stripe reads are page-capped; the result is `unverified`, not a hang |
-| SQL injection via claim | Table and column names come from your code and are pattern-checked; values are always bound parameters |
+| SQL injection via claim or config | Table and column names come from your code and are pattern-checked; the `placeholder` must be a DB-API paramstyle (`?`, `%s`, `:name`, `:1`, `$1`); values are always bound parameters |
+| Verifier overloading the system of record | Opt-in `limit_reads(..., RateLimit(...))` caps every read; it only delays reads, and with `max_wait` an over-long wait is `unverified`, never `failed` (see [Rate limiting the verifier's reads](#rate-limiting-the-verifiers-reads)) |
 | Unreadable system of record | `unverified`, never `verified` and never `failed` |
 
 Known limits: `Claim.context` is stored as given; `Verdict.observed` holds
 real values in memory (do not print it in production logs); a pending Stripe
 refund is `unverified` until you `recheck` it, and scheduling that is up to
-you; no rate limiting on the verifier's own reads. No external security or compliance review has been done.
+you; rate limiting is opt-in (`limit_reads`) and does not retry a 429. No external security or compliance review has been done.
 
 ## Repeat sandbox validation
 

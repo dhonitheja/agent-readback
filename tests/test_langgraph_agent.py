@@ -20,7 +20,7 @@ def test_every_done_is_verified_without_faults(tmp_path):
 
 def test_every_false_done_is_caught_when_the_server_lies(tmp_path):
     summary = run(runs=10, inject_faults=1.0, seed=1, log_path=tmp_path / "e.jsonl")
-    assert summary["outcomes"] == {"false_completion_caught": 10} and summary["chain_intact"]
+    assert summary["outcomes"] == {"false_completion": 10} and summary["chain_intact"]
 
 
 def test_cancel_through_tool_node_looks_up_patient_via_verifier(server, tools):
@@ -68,7 +68,7 @@ def test_model_agent_tool_loop_is_verified(tmp_path):
     chat = FakeChat([book, lambda m: AIMessage(content="DONE: booked.")])
     summary = run(runs=1, inject_faults=1.0, seed=0, log_path=tmp_path / "e.jsonl", chat=chat)
     # every write is faulted (the server still answers ok), so the model's DONE must be caught
-    assert summary["outcomes"] == {"false_completion_caught": 1} and summary["chain_intact"]
+    assert summary["outcomes"] == {"false_completion": 1} and summary["chain_intact"]
 
 
 def test_failed_patient_lookup_still_logs_an_unverified_verdict(server, tmp_path):
@@ -109,8 +109,10 @@ def test_outcome_labels_unclear_replies_and_retries():
     bad = Verdict(Status.FAILED, claim, (Finding(FindingKind.MISSING, "gone"),))
     assert outcome("I booked it.", [ok]) == "unclear_reply"
     assert outcome("DONE: booked", [bad, ok]) == "done_after_failed_write"
-    assert outcome("DONE: booked", [ok, bad]) == "false_completion_caught"
+    assert outcome("DONE: booked", [ok, bad]) == "false_completion"
     assert outcome("done: booked", [ok]) == "done_and_verified"
+    assert outcome("FAILED: no slot", [bad]) == "reported_failure"
+    assert outcome("FAILED: no slot", [ok]) == "said_failed_but_actually_done"
     assert text_of(AIMessage(content=["DONE:", {"type": "text", "text": "booked"}])) == "DONE: booked"
 
 
@@ -138,4 +140,18 @@ def test_wrong_time_booking_with_done_is_caught_by_the_task_check(tmp_path):
     chat = FakeChat([book_wrong_time, lambda m: AIMessage(content="DONE: booked.")])
     summary = run(runs=1, inject_faults=0.0, seed=0, log_path=tmp_path / "e.jsonl", chat=chat)
     # the write itself verifies against the model's own arguments; the task check does not
-    assert summary["outcomes"] == {"false_completion_caught": 1} and summary["chain_intact"]
+    assert summary["outcomes"] == {"false_completion": 1} and summary["chain_intact"]
+
+
+def test_failed_reply_is_classified_by_the_task_verdict_like_run_eval():
+    from agent_readback import Claim, Finding, FindingKind, Verdict
+    from examples.healthcare.langgraph_agent import outcome
+
+    claim = Claim("fhir.appointment.create", "", {})
+    write_ok = Verdict(Status.VERIFIED, claim, ())
+    task_failed = Verdict(Status.FAILED, claim, (Finding(FindingKind.WRONG_VALUE, "wrong time"),))
+    task_ok = Verdict(Status.VERIFIED, claim, ())
+    # The write held but at the wrong time, and the model said FAILED: the task did not complete.
+    assert outcome("FAILED: could not confirm", [write_ok], task_failed) == "reported_failure"
+    assert outcome("FAILED: could not confirm", [write_ok], task_ok) == "said_failed_but_actually_done"
+    assert outcome("FAILED: no slot", [write_ok]) == "said_failed_but_actually_done"  # no task: write fallback

@@ -359,3 +359,123 @@ def test_bad_or_missing_anchor_file_exits_3(tmp_path):
     assert main(["verify-log", str(log.path), "--anchor", str(tmp_path / "missing.json")]) == 3
     anchor.path.write_text('{"count": "3", "head": "x"}')
     assert main(["verify-log", str(log.path), "--anchor", str(anchor.path)]) == 3
+
+
+def test_new_log_is_readable_only_by_its_owner(tmp_path):
+    import os
+    import subprocess
+
+    path = tmp_path / "log.jsonl"
+    EvidenceLog(path).append(verdict(0))
+    if os.name != "nt":
+        assert path.stat().st_mode & 0o077 == 0
+        return
+    acl = subprocess.run(["icacls", str(path)], capture_output=True, text=True, check=True).stdout
+    grants = [line for line in acl.splitlines() if ":(" in line]
+    assert len(grants) == 1 and "(I)" not in acl, acl  # one explicit grant, nothing inherited
+    assert os.environ["USERNAME"].lower() in grants[0].lower()
+    for other in ("Everyone", "Users", "Authenticated Users", "Administrators", "SYSTEM"):
+        assert f"\\{other}:" not in acl and f" {other}:" not in acl
+
+
+def test_log_still_written_when_owner_only_access_cannot_be_set(tmp_path, monkeypatch):
+    import os
+    import subprocess
+
+    if os.name != "nt":
+        pytest.skip("owner-only access uses icacls on Windows only")
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(a, 5, "", "Access is denied."))
+    path = tmp_path / "log.jsonl"
+    with pytest.warns(RuntimeWarning, match="could not restrict"):
+        EvidenceLog(path).append(verdict(0))
+    assert EvidenceLog(path).verify_chain() == (True, None)
+
+
+def test_spoofed_username_cannot_lock_the_writer_out_of_its_own_log(tmp_path, monkeypatch):
+    import os
+    import subprocess
+
+    if os.name != "nt":
+        pytest.skip("owner-only access uses icacls on Windows only")
+    me = os.environ["USERNAME"]
+    # A real, resolvable account that is not this process: the old code granted it the log.
+    monkeypatch.setenv("USERDOMAIN", "BUILTIN")
+    monkeypatch.setenv("USERNAME", "Guests")
+    monkeypatch.setenv("SystemRoot", str(tmp_path))  # a fake System32 here would have been run
+    path = tmp_path / "log.jsonl"
+    log = EvidenceLog(path)
+    log.append(verdict(0))
+    log.append(verdict(1))  # failed with PermissionError when the grant went to the wrong account
+    assert EvidenceLog(path).verify_chain() == (True, None)
+    acl = subprocess.run(["icacls", str(path)], capture_output=True, text=True, check=True).stdout
+    assert "Guests" not in acl and me.lower() in acl.lower()
+
+
+def test_log_is_restricted_before_its_first_record_is_written(tmp_path, monkeypatch):
+    from agent_readback import evidence
+
+    sizes = []
+    monkeypatch.setattr(evidence, "_owner_only", lambda path: sizes.append(path.stat().st_size))
+    path = tmp_path / "log.jsonl"
+    log = EvidenceLog(path)
+    log.append(verdict(0))
+    log.append(verdict(1))
+    assert sizes == [0]  # restricted once, while still empty; never again for an existing log
+
+
+def test_icacls_failing_without_output_still_warns(tmp_path, monkeypatch):
+    import os
+    import subprocess
+
+    if os.name != "nt":
+        pytest.skip("owner-only access uses icacls on Windows only")
+
+    def fake_run(args, **kwargs):
+        if args[0].lower().endswith("whoami.exe"):
+            return subprocess.CompletedProcess(args, 0, '"host\\me","S-1-5-21-1-2-3-1001"\n', "")
+        return subprocess.CompletedProcess(args, 1, "", "")  # icacls: failed, printed nothing
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    path = tmp_path / "log.jsonl"
+    with pytest.warns(RuntimeWarning, match="icacls exited with 1"):
+        EvidenceLog(path).append(verdict(0))
+    assert EvidenceLog(path).verify_chain() == (True, None)
+
+
+def test_explicit_access_entries_on_a_new_log_are_removed_too(tmp_path):
+    import os
+    import subprocess
+
+    if os.name != "nt":
+        pytest.skip("owner-only access uses icacls on Windows only")
+    from agent_readback.evidence import _owner_only
+
+    path = tmp_path / "log.jsonl"
+    path.touch()
+    icacls = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32", "icacls.exe")
+    # An explicit (not inherited) grant, as GitHub's Windows runners leave on new files.
+    subprocess.run([icacls, str(path), "/grant", "*S-1-5-32-545:R"], capture_output=True, check=True)  # BUILTIN\Users
+    _owner_only(path)
+    acl = subprocess.run([icacls, str(path)], capture_output=True, text=True, check=True).stdout
+    grants = [line for line in acl.splitlines() if ":(" in line]
+    assert len(grants) == 1 and "BUILTIN\\Users" not in acl, acl  # the path itself contains "Users"
+
+
+def test_undecodable_tool_output_cannot_stop_the_first_append(tmp_path, monkeypatch):
+    import os
+    import subprocess
+
+    if os.name != "nt":
+        pytest.skip("owner-only access uses icacls on Windows only")
+    calls = []
+
+    def run(args, **kwargs):
+        calls.append(kwargs)
+        raise UnicodeDecodeError("cp1252", b"\x81", 0, 1, "undefined byte in a localized message")
+
+    monkeypatch.setattr(subprocess, "run", run)
+    path = tmp_path / "log.jsonl"
+    with pytest.warns(RuntimeWarning, match="could not restrict"):
+        EvidenceLog(path).append(verdict(0))  # used to raise out of append
+    assert EvidenceLog(path).verify_chain() == (True, None)
+    assert calls and calls[0].get("errors") == "replace"  # real output is decoded tolerantly
