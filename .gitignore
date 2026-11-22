@@ -10,3 +10,5 @@ graphify-out/
 .test-tmp*/
 .test-python*/
 .venv*/
+.claude-flow/
+.pytest-live-assessment*/

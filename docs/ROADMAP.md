@@ -50,3 +50,5 @@ infrastructure from the maintainer. Step 12 needs outside reviewers.
   OpenAI models, `tzdata` on Windows.
 - Verified locally (2026-11-22, 0.3.0 plus unreleased fixes): 184 tests pass on MCP 1.30 and on MCP 2.3, both with
   LangGraph 1.2 (1 symlink test skips on Windows without symlink privileges).
+- Verified locally (2026-11-22, 0.3.1): 198 tests pass, 1 symlink test skips, on Windows with MCP 1.30 and LangGraph 1.2.
+  The 0.3.0 line above predates the 0.3.1 fixes; MCP 2.3 has not been re-run on 0.3.1 locally (CI covers both).
