@@ -65,15 +65,30 @@ class StripeRefundVerifier:
     def _refunds(self, payment_intent: str) -> dict[str, dict[str, Any]]:
         found: dict[str, dict[str, Any]] = {}
         params: dict[str, Any] = {"payment_intent": payment_intent, "limit": 100}
+        cursors: set[str] = set()
         for _ in range(MAX_PAGES):
             response = self.client.get("/v1/refunds", params=params)
             response.raise_for_status()
+            # Server JSON is untrusted: a wrong shape is a read error (unverified), never a crash.
             page = response.json()
-            for item in page.get("data", []):
+            if not isinstance(page, dict):
+                raise ValueError("malformed Stripe response: refund page is not an object")
+            items, has_more = page.get("data", []), page.get("has_more", False)
+            if not isinstance(items, list) or not isinstance(has_more, bool):
+                raise ValueError("malformed Stripe response: data is not a list or has_more is not a boolean")
+            for item in items:
+                if not isinstance(item, dict) or not isinstance(item.get("id"), str) or not item["id"]:
+                    raise ValueError("malformed Stripe response: refund without a string id")
                 found[item["id"]] = {name: item.get(name) for name in FIELDS}
-            if not page.get("has_more") or not page.get("data"):
+            if not has_more:
                 return found
-            params["starting_after"] = page["data"][-1]["id"]
+            if not items:  # more pages promised but no cursor to reach them: an incomplete read
+                raise ValueError("malformed Stripe response: has_more is true but the page is empty")
+            cursor = items[-1]["id"]
+            if cursor in cursors:  # the server repeats a page: stop now, not after MAX_PAGES requests
+                raise ValueError("Stripe refund pagination did not advance")
+            cursors.add(cursor)
+            params["starting_after"] = cursor
         raise ValueError(f"more than {MAX_PAGES} pages of refunds; refusing to continue")
 
     def snapshot(self, claim: Claim) -> set[str] | None:

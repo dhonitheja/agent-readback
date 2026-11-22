@@ -263,3 +263,63 @@ def test_odd_next_links_never_crash_the_snapshot(link):
     with httpx.Client(transport=httpx.MockTransport(handle), base_url="https://fhir.test") as client:
         result = FhirAppointmentVerifier(client).snapshot(create_claim())
     assert result in (set(), None)  # followed, or refused as unverified; never an exception
+
+
+MALFORMED_BUNDLES = {
+    "bundle is a list": [],
+    "entry is a string": {"resourceType": "Bundle", "entry": "x"},
+    "entry item is a string": {"resourceType": "Bundle", "entry": ["x"]},
+    "resource is a string": {"resourceType": "Bundle", "entry": [{"resource": "x"}]},
+    "id is an object": {"resourceType": "Bundle", "entry": [{"resource": {"id": {"x": 1}}}]},
+    "participant is a string": {"resourceType": "Bundle", "entry": [{"resource": {"id": "a1", "participant": "x"}}]},
+    "actor reference is a number": {"resourceType": "Bundle", "entry": [{"resource": {"id": "a1", "participant": [{"actor": {"reference": 7}}]}}]},
+    "link is a string": {"resourceType": "Bundle", "entry": [], "link": "next"},
+    "link item is a string": {"resourceType": "Bundle", "entry": [], "link": ["next"]},
+    "next url is a number": {"resourceType": "Bundle", "entry": [], "link": [{"relation": "next", "url": 5}]},
+}
+
+
+@pytest.mark.parametrize("body", MALFORMED_BUNDLES.values(), ids=MALFORMED_BUNDLES.keys())
+def test_malformed_fhir_search_is_unverified_not_a_crash(body):
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, json=body))
+    with httpx.Client(transport=transport, base_url="https://fhir.test") as client:
+        verifier = FhirAppointmentVerifier(client)
+        assert verifier.snapshot(create_claim()) is None
+        assert verifier.check(create_claim(), set()).status is Status.UNVERIFIED
+
+
+def test_malformed_fhir_read_by_id_is_unverified_not_a_crash(server, tools):
+    from agent_readback.verifiers.fhir import flatten_appointment
+
+    for bad in ([], "x", {"id": "a1", "participant": [42]}):
+        with pytest.raises(ValueError, match="malformed FHIR response"):
+            flatten_appointment(bad)
+
+
+def _bundle_appointment(appointment_id, start=START):
+    return {"resource": {"resourceType": "Appointment", "id": appointment_id, "status": "booked", "start": start,
+                         "end": END, "participant": [{"actor": {"reference": PATIENT}}, {"actor": {"reference": DOCTOR}}]}}
+
+
+@pytest.mark.parametrize("next_link", [{"relation": "next", "url": None}, {"relation": "next", "url": ""}, {"relation": "next"}])
+def test_next_link_without_a_usable_url_is_an_incomplete_read_not_verified(next_link):
+    # The duplicate booking would be on page 2; a next link we cannot follow must not end the search as complete.
+    pages = [{"resourceType": "Bundle", "entry": []},
+             {"resourceType": "Bundle", "entry": [_bundle_appointment("a1")], "link": [next_link]}]
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, json=pages.pop(0) if len(pages) > 1 else pages[0]))
+    with httpx.Client(transport=transport, base_url="https://fhir.test") as client:
+        verifier = FhirAppointmentVerifier(client)
+        before = verifier.snapshot(create_claim())
+        assert before == set()
+        assert verifier.check(create_claim(), before).status is Status.UNVERIFIED
+
+
+def test_timestamp_without_a_utc_form_is_a_mismatch_not_a_crash():
+    assert normalize_instant("0001-01-01T00:00:00+01:00") == "0001-01-01T00:00:00+01:00"
+    pages = [{"resourceType": "Bundle", "entry": []},
+             {"resourceType": "Bundle", "entry": [_bundle_appointment("a1", "0001-01-01T00:00:00+01:00")]}]
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, json=pages.pop(0) if len(pages) > 1 else pages[0]))
+    with httpx.Client(transport=transport, base_url="https://fhir.test") as client:
+        verifier = FhirAppointmentVerifier(client)
+        verdict = verifier.check(create_claim(), verifier.snapshot(create_claim()))
+    assert verdict.status is Status.FAILED and [f.field for f in verdict.findings] == ["start"]

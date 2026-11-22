@@ -4,6 +4,21 @@ All notable changes to `agent-readback`. Dates are UTC.
 
 ## Unreleased
 
+### Fixed
+
+- An incomplete read could be `verified`. A FHIR next link with a null or
+  empty URL, or a Stripe page with `has_more: true` and no refunds, ended the
+  read as if it were complete, so a duplicate booking or a double refund on an
+  unread page could pass. Both are now `unverified`.
+- A timestamp with no UTC form (for example year 1 at `+01:00`) raised
+  `OverflowError`; it is now left as is and shows as a mismatch.
+- A malformed FHIR or Stripe response (for example a list where an object is
+  expected, a string entry, or a non-string id or reference) made the verifier
+  raise `AttributeError` or `TypeError` out of `watch()`, breaking the agent's
+  call. Responses are now shape-checked where they are parsed and anything
+  malformed is `unverified`. A Stripe refund page that repeats now stops after
+  the second request instead of after `MAX_PAGES`.
+
 ### Documentation
 
 - README reworked as a front page: quick start near the top, a results table,
