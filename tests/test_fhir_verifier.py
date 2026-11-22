@@ -184,7 +184,8 @@ def test_appointment_without_an_id_is_a_read_error():
     # Keying id-less entries by position let an unchanged one look new at check time.
     from agent_readback.verifiers.fhir import flatten_appointment
 
-    for bad in ({"resourceType": "Appointment", "status": "booked"}, {"resourceType": "Appointment", "id": ""}):
+    for bad in ({"resourceType": "Appointment", "status": "booked"}, {"resourceType": "Appointment", "id": ""},
+                {"resourceType": "Appointment", "id": "   "}):
         with pytest.raises(ValueError, match="malformed FHIR response"):
             flatten_appointment(bad)
 
@@ -273,9 +274,9 @@ MALFORMED_BUNDLES = {
     "entry is a string": {"resourceType": "Bundle", "entry": "x"},
     "entry item is a string": {"resourceType": "Bundle", "entry": ["x"]},
     "resource is a string": {"resourceType": "Bundle", "entry": [{"resource": "x"}]},
-    "id is an object": {"resourceType": "Bundle", "entry": [{"resource": {"id": {"x": 1}}}]},
-    "participant is a string": {"resourceType": "Bundle", "entry": [{"resource": {"id": "a1", "participant": "x"}}]},
-    "actor reference is a number": {"resourceType": "Bundle", "entry": [{"resource": {"id": "a1", "participant": [{"actor": {"reference": 7}}]}}]},
+    "id is an object": {"resourceType": "Bundle", "entry": [{"resource": {"resourceType": "Appointment", "id": {"x": 1}}}]},
+    "participant is a string": {"resourceType": "Bundle", "entry": [{"resource": {"resourceType": "Appointment", "id": "a1", "participant": "x"}}]},
+    "actor reference is a number": {"resourceType": "Bundle", "entry": [{"resource": {"resourceType": "Appointment", "id": "a1", "participant": [{"actor": {"reference": 7}}]}}]},
     "link is a string": {"resourceType": "Bundle", "entry": [], "link": "next"},
     "link item is a string": {"resourceType": "Bundle", "entry": [], "link": ["next"]},
     "next url is a number": {"resourceType": "Bundle", "entry": [], "link": [{"relation": "next", "url": 5}]},

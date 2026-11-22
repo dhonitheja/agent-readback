@@ -58,7 +58,7 @@ def flatten_appointment(resource: dict[str, Any]) -> dict[str, Any]:
     resource = _object(resource, "Appointment")
     if resource.get("resourceType") != "Appointment":  # e.g. an OperationOutcome sent with HTTP 200
         raise ValueError("malformed FHIR response: resource is not an Appointment")
-    if not isinstance(resource.get("id"), str) or not resource["id"]:
+    if not isinstance(resource.get("id"), str) or not resource["id"].strip():
         # A stored resource always has an id; keying by position would let an old entry look new.
         raise ValueError("malformed FHIR response: Appointment.id is missing or not a string")
     flat: dict[str, Any] = {
