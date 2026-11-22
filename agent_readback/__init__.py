@@ -6,7 +6,7 @@ from .core import Claim, Finding, FindingKind, Status, Verdict, Verifier, compar
 from .evidence import EvidenceLog, FileAnchor
 from .ratelimit import RateLimit, RateLimitTimeout, limit_reads
 
-__version__ = "0.3.0"
+__version__ = "0.3.1"
 __all__ = [
     "Claim",
     "EvidenceLog",
