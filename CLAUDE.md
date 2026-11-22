@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-Readback (`agent-readback`, v0.3.0): checks an AI agent's "Done." claim against the system of record. Snapshot before the agent acts, re-read afterward through a read-only path, emit a deterministic verdict (`verified` / `failed` / `unverified`). Verdicts never come from an LLM. Only runtime dependency: `httpx`.
+Readback (`agent-readback`, v0.3.1): checks an AI agent's "Done." claim against the system of record. Snapshot before the agent acts, re-read afterward through a read-only path, emit a deterministic verdict (`verified` / `failed` / `unverified`). Verdicts never come from an LLM. Only runtime dependency: `httpx`.
 
 ## Commands
 

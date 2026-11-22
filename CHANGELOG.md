@@ -2,7 +2,7 @@
 
 All notable changes to `agent-readback`. Dates are UTC.
 
-## Unreleased
+## 0.3.1 — 2026-11-22
 
 ### Fixed
 
@@ -11,7 +11,8 @@ All notable changes to `agent-readback`. Dates are UTC.
   read as if it were complete, so a duplicate booking or a double refund on an
   unread page could pass. Both are now `unverified`.
 - A timestamp with no UTC form (for example year 1 at `+01:00`) raised
-  `OverflowError`; it is now left as is and shows as a mismatch.
+  `OverflowError`; it is now compared as written, so it matches only an identical
+  string; the same instant written another way is a `wrong_value`.
 - A malformed FHIR or Stripe response (for example a list where an object is
   expected, a string entry, or a non-string id or reference) made the verifier
   raise `AttributeError` or `TypeError` out of `watch()`, breaking the agent's

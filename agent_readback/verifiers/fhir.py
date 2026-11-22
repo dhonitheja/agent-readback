@@ -33,11 +33,11 @@ def normalize_instant(value: Any) -> Any:
     except ValueError:
         return value
     if parsed.tzinfo is None:
-        return value  # a time with no zone is ambiguous; leave it so it shows as a mismatch
+        return value  # a time with no zone is ambiguous; compared as written: it matches only identical text
     try:
         return parsed.astimezone(timezone.utc).isoformat()
     except OverflowError:
-        return value  # e.g. year 1 at +01:00 has no UTC form; leave it so it shows as a mismatch
+        return value  # e.g. year 1 at +01:00 has no UTC form; compared as written: it matches only identical text
 
 
 def _object(value: Any, what: str) -> dict[str, Any]:
