@@ -2,7 +2,7 @@
 
 [![tests](https://github.com/dhonitheja/agent-readback/actions/workflows/tests.yml/badge.svg)](https://github.com/dhonitheja/agent-readback/actions/workflows/tests.yml)
 
-Check what an AI agent says it did against the system of record.
+**Check what an AI agent says it did against the system of record.**
 
 An agent that books an appointment, issues a refund or updates a row usually
 ends with "Done." That message is a claim. Readback treats it as one: it
@@ -30,83 +30,16 @@ flowchart LR
     G --> H
 ```
 
-| Problem | Example | Finding |
-|---|---|---|
-| The write never landed | API answered 201, nothing was stored | `missing` |
-| A field is wrong | Appointment saved a day late, refund for the wrong amount | `wrong_value` |
-| Something extra happened | Duplicate booking, double refund, unclaimed extra row | `extra_effect` |
-| The check could not run | System of record was down | `unreachable` |
+## Quick start
 
-## What is tested and what is not
-
-Version 0.3.0. All 162 offline tests pass with the optional test dependencies
-installed. A separate public HAPI FHIR R4
-sandbox run verified 10 scripted operations (6 bookings, 1 reschedule,
-3 cancellations); this is a compatibility smoke test, not production validation.
-A Stripe test-mode run produced the expected verdict for all four refund
-scenarios, using a separate restricted key that was confirmed unable to
-create refunds.
-
-| Part | Tested against | Not yet tested against |
-|---|---|---|
-| FHIR appointment verifier (create, update, cancel) | in-memory mock, incomplete pagination, stale-search regression, off-server next links; public HAPI R4 sandbox smoke test | a production EHR, authenticated read-only isolation |
-| Stripe refund verifier and sandbox runner | mock refunds endpoint; test-key guards; Stripe test mode with a read-only restricted key: success, missing, wrong-amount and duplicate scenarios | live mode, a refund left pending by the bank |
-| SQL row verifier | SQLite, including insert with concurrent deletion | Postgres or any other database |
-| Anthropic and OpenAI-compatible agent loops | Mock responses cover each API's message format, Responses tool-call chaining with and without storage, and a once-per-evaluation warning for a model HTTP 400. Earlier live Anthropic runs (claude-sonnet-5-5 and claude-haiku-5-5, 50 tasks each, 20% injected faults) caught every false completion and matched the scripted baseline run for run. On the same tasks and faults, gpt-6-luna with `--reasoning-effort none` caught all 13 injected faults plus 6 of its own wrong reschedule or cancel values. With `--provider openai-responses --reasoning-effort medium`, it caught all 13 and matched the scripted baseline run for run, both with server-side storage and with `--no-store` (OpenAI echoed `store: false`; encrypted reasoning was sent back each turn instead of `previous_response_id`). The LangGraph agent (`examples/healthcare/langgraph_agent.py`, 50 tasks per model, seed 7, 20% injected faults) gave the same task verdict and finding kinds as `run_eval` and the scripted baseline in every run for claude-sonnet-5-5, claude-haiku-5-5 and gpt-6-luna (LangChain default reasoning effort); all three evidence chains were intact. Haiku and gpt-6-luna: 37 `done_and_verified`, 13 `false_completion`. Sonnet: 37, 11 and 2 `reported_failure`: in one run whose write the verifier failed, it reported the failure instead of claiming DONE. | Reasoning efforts other than `none` and `medium`; LangGraph with other models |
-| Evidence log, redaction, report, dashboard, webhook | unit tests, including HTML escaping of hostile context values and a BROKEN dashboard for a tampered log | production load |
-| `watched()` adapters | Sync and async functions, including off-loop verifier reads when an async tool raises, a verdict even when an AnyIO cancel scope cancels the tool after it writes, and objects with `async def __call__`. MCP 1.30 and 2.3 `ClientSession` run against in-memory FastMCP, a local stdio subprocess, and the same server over Streamable HTTP on 127.0.0.1, both backed by SQLite; over HTTP a booking the agent misdescribes is `failed` on the field read back from the database. LangGraph 0.2 and 1.2 run a wrapped `StateGraph` node and a wrapped LangChain tool in `ToolNode`, plus a full agent/`ToolNode` loop (`examples/healthcare/langgraph_agent.py`) that catches every false DONE under injected faults. Mock FHIR tests catch injected drop, wrong-time, wrong-practitioner and duplicate faults. | MCP over HTTP to a remote host, with TLS or auth |
-
-No security or compliance review has been done.
-
-## Install and run
+Install (Python 3.10+; the only runtime dependency is `httpx`):
 
 ```bash
-pip install -e ".[dev]"
-pytest
-python -m examples.healthcare.run_eval --provider scripted --runs 200 --inject-faults 0.2
+pip install "agent-readback @ git+https://github.com/dhonitheja/agent-readback@v0.3.0"
 ```
 
-That last command uses a scripted agent that always makes the correct tool
-calls, and a mock FHIR server told to mishandle 20% of writes while still
-answering "success". Output:
-
-```
-Requests:                         200
-Agent said DONE:                  200
-  verified in the record:         170
-  FALSE COMPLETIONS caught:       30  (15.0% of DONE)
-Why the false completions failed:
-  extra_effect: 7
-  missing: 8
-  wrong_value: 16
-```
-
-The 15% is produced by the injected faults. It demonstrates the mechanism and
-is not a measurement of any real agent.
-
-## Measure a real model
-
-Keep the key in your shell environment. Do not put it in a file you commit.
-
-```bash
-export ANTHROPIC_API_KEY=...
-python -m examples.healthcare.run_eval --provider anthropic --model claude-haiku-5-5 --runs 100 --out results-haiku.json
-
-export OPENAI_API_KEY=...
-python -m examples.healthcare.run_eval --provider openai --model gpt-6-luna --reasoning-effort none --runs 100 --out results-luna.json
-python -m examples.healthcare.run_eval --provider openai-responses --model gpt-6-luna --reasoning-effort medium --runs 100 --out results-luna-reasoning.json
-```
-
-Add `--no-store` to the Responses command to send the conversation and
-encrypted reasoning with each tool follow-up instead of using stored response IDs.
-
-The agent receives requests in plain English with Central Time dates, must
-convert them to UTC, and must find the right appointment before changing it.
-With no injected faults, every false completion in the result is the model's
-own. Add `--fhir-url <base URL>` to run against a real FHIR R4 test server;
-only synthetic patients and practitioners are created.
-
-## Use it around your own agent
+Wrap the call your agent makes. Readback snapshots before it, reads back after
+it, and logs the verdict even if the agent raises:
 
 ```python
 import httpx
@@ -128,30 +61,88 @@ if not w.verdict.ok:
     escalate_to_human(w.verdict)
 ```
 
-### Re-checking later: refunds the bank has not settled
+Give the verifier its own read-only credentials. If the agent and the verifier
+share a write path, the check proves nothing.
 
-A Stripe refund that matches the claim but is still `pending` gives an
-`unverified` verdict with a `pending` finding. Keep `verdict.to_dict()` in your
-own queue and judge it again once the bank has had time:
+### See it catch false completions
 
-```python
-from agent_readback import recheck
+The demo and examples live in the repository, not the installed package:
 
-again = recheck(StripeRefundVerifier(client), stored_dict, log)   # verified, failed, or still pending
+```bash
+git clone https://github.com/dhonitheja/agent-readback && cd agent-readback
+pip install -e ".[dev]"
+python -m examples.healthcare.run_eval --provider scripted --runs 200 --inject-faults 0.2
 ```
 
-Only the refunds seen at the first check are judged; refunds created since
-then are not counted. The new verdict is logged with
-`context["recheck_of"]` set to the first `checked_at`. A verified or failed
-verdict is never re-checked. The stored dict holds the observed refund values,
-so protect the queue like the system of record itself.
+A scripted agent always makes the correct tool calls, and a mock FHIR server
+is told to mishandle 20% of writes while still answering "success":
+
+```
+Requests:                         200
+Agent said DONE:                  200
+  verified in the record:         170
+  FALSE COMPLETIONS caught:       30  (15.0% of DONE)
+Why the false completions failed:
+  extra_effect: 7
+  missing: 8
+  wrong_value: 16
+```
+
+The 15% is produced by the injected faults. It demonstrates the mechanism and
+is not a measurement of any real agent.
+
+## What it catches
+
+| Problem | Example | Finding |
+|---|---|---|
+| The write never landed | API answered 201, nothing was stored | `missing` |
+| A field is wrong | Appointment saved a day late, refund for the wrong amount | `wrong_value` |
+| Something extra happened | Duplicate booking, double refund, unclaimed extra row | `extra_effect` |
+| The check could not run | System of record was down | `unreachable` |
+| Not settled yet | Stripe refund matches but the bank has not settled it | `pending` |
+
+| Verifier | Actions | Catches |
+|---|---|---|
+| `FhirAppointmentVerifier` | `fhir.appointment.create`, `.update`, `.cancel` | never stored, wrong time or practitioner, duplicate booking, wrong appointment changed |
+| `StripeRefundVerifier` | `stripe.refund.create` | refund never issued, wrong amount or currency, failed refund, double refund |
+| `SqlRowVerifier` | `sql.row.insert`, `sql.row.update` | row absent, wrong column value, unclaimed extra or deleted rows |
+
+To add one, implement `snapshot(claim)` and `check(claim, before)` from
+`agent_readback/core.py`.
+
+## Results with real models
+
+Healthcare tasks (book, reschedule, cancel) given in plain English with
+Central Time dates; the model converts them to UTC and picks its own tool
+calls. 20% of writes were sabotaged by the mock server while it still answered
+"success".
+
+| Agent | Harness | Result |
+|---|---|---|
+| claude-sonnet-5-5, claude-haiku-5-5 | `run_eval`, 50 tasks each | Caught every false completion; matched the scripted baseline run for run |
+| gpt-6-luna, `--reasoning-effort none` | `run_eval`, 50 tasks | Caught all 13 injected faults plus 6 of the model's own wrong reschedule or cancel values |
+| gpt-6-luna, `--provider openai-responses --reasoning-effort medium` | `run_eval`, 50 tasks | Caught all 13; matched the scripted baseline run for run, with server-side storage and with `--no-store` |
+| claude-sonnet-5-5, claude-haiku-5-5, gpt-6-luna | LangGraph agent, 50 tasks each, seed 7 | Same task verdict and finding kinds as `run_eval` and the scripted baseline in every run; all evidence chains intact |
+
+LangGraph outcomes: Haiku and gpt-6-luna 37 `done_and_verified` and 13
+`false_completion`; Sonnet 37, 11 and 2 `reported_failure`, because in one run
+whose write the verifier failed it reported the failure instead of claiming
+DONE. gpt-6-luna ran with LangChain's default reasoning effort. With
+`--no-store`, OpenAI echoed `store: false` and encrypted reasoning was sent back
+each turn instead of `previous_response_id`. An earlier 3-run LangGraph smoke
+test (2026-11-19, 30% faults) gave 2 verified and 1 false DONE caught per
+model; too small to compare models.
+
+To run these yourself, see [Measure a real model](#measure-a-real-model).
+
+## Integrations
 
 ### One-line adapters: MCP tool calls and LangGraph nodes
 
-`watched()` wraps any sync or async function with the same `watch()` cycle. `to_claim`
-gets the call's arguments and returns the claim to check, or `None` to skip. The result
-is returned unchanged; verdicts go to `on_verdict`. Neither MCP nor LangGraph is a
-dependency.
+`watched()` wraps any sync or async function with the same `watch()` cycle.
+`to_claim` gets the call's arguments and returns the claim to check, or `None`
+to skip. The result is returned unchanged; verdicts go to `on_verdict`. Neither
+MCP nor LangGraph is a dependency.
 
 ```python
 from agent_readback import Claim, mcp_text, watched
@@ -177,19 +168,30 @@ python -m venv .venv
 source .venv/bin/activate          # Windows: .venv\Scripts\activate, or source .venv/Scripts/activate in Git Bash
 python -m pip install -e ".[dev,langgraph]"
 python -m examples.healthcare.langgraph_agent --runs 20 --inject-faults 0.3   # scripted agent, no API key
-```
-
-With a real model through `langchain-anthropic` or `langchain-openai` (keys from
-the environment or `.env`; the model gets book, reschedule and cancel requests
-in Central time and picks its own tool calls), in the same activated venv:
-
-```bash
 python -m examples.healthcare.langgraph_agent --provider anthropic --model claude-haiku-5-5 --runs 10
 python -m examples.healthcare.langgraph_agent --provider openai --model gpt-6-luna --runs 10
 ```
 
-A 3-run smoke test with each model (2026-11-19, 30% injected faults) gave
-2 verified and 1 false DONE caught per model. Too small to compare models.
+Real models run through `langchain-anthropic` or `langchain-openai`, with keys
+from the environment or `.env`.
+
+### Re-checking later: refunds the bank has not settled
+
+A Stripe refund that matches the claim but is still `pending` gives an
+`unverified` verdict with a `pending` finding. Keep `verdict.to_dict()` in your
+own queue and judge it again once the bank has had time:
+
+```python
+from agent_readback import recheck
+
+again = recheck(StripeRefundVerifier(client), stored_dict, log)   # verified, failed, or still pending
+```
+
+Only the refunds seen at the first check are judged; refunds created since
+then are not counted. The new verdict is logged with `context["recheck_of"]`
+set to the first `checked_at`. A verified or failed verdict is never
+re-checked. The stored dict holds the observed refund values, so protect the
+queue like the system of record itself.
 
 ### Rate limiting the verifier's reads
 
@@ -214,18 +216,6 @@ sql = SqlRowVerifier(limit_reads(connect, limit), "orders", "id")      # every c
 - A 429 the server still sends is a read error, so `unverified`. It is not
   retried.
 
-## Verifiers
-
-| Verifier | Actions | Catches |
-|---|---|---|
-| `FhirAppointmentVerifier` | `fhir.appointment.create`, `.update`, `.cancel` | never stored, wrong time or practitioner, duplicate booking, wrong appointment changed |
-| `StripeRefundVerifier` | `stripe.refund.create` | refund never issued, wrong amount or currency, failed refund, double refund |
-| `SqlRowVerifier` | `sql.row.insert`, `sql.row.update` | row absent, wrong column value, unclaimed extra or deleted rows |
-
-To add one, implement `snapshot(claim)` and `check(claim, before)` from
-`agent_readback/core.py`. Give every verifier its own read-only credentials.
-If the agent and the verifier share a write path, the check proves nothing.
-
 ## Evidence log
 
 Every verdict is appended to a JSON-lines file in which each record carries
@@ -240,21 +230,35 @@ readback verify-log --require-key evidence.jsonl   # audits: fail unless READBAC
 # exit codes: 0 intact, 1 broken or untrustworthy, 2 bad arguments, 3 file error
 ```
 
-The dashboard shows the same redacted data as the log, with every value
-HTML-escaped. A sample is in [`docs/sample-report.html`](docs/sample-report.html).
+On Windows the `readback` script may land outside `PATH`; use
+`python -m agent_readback` instead. The dashboard shows the same redacted data
+as the log, with every value HTML-escaped. A sample is in
+[`docs/sample-report.html`](docs/sample-report.html).
 
-With `READBACK_LOG_KEY` set (or `EvidenceLog(path, key=...)`) every hash is an
-HMAC-SHA256, so nobody without the key can rewrite the chain and pass it off
-as genuine. Always set it in production. The file is created readable by its
-owner only and opened append-only; use one writer per file.
+- **Keyed hashes.** With `READBACK_LOG_KEY` set (or `EvidenceLog(path, key=...)`)
+  every hash is an HMAC-SHA256, so nobody without the key can rewrite the chain
+  and pass it off as genuine. Always set it in production.
+- **Owner-only, append-only.** The file is created readable by its owner only
+  and opened append-only; use one writer per file.
+- **Redacted by default.** The log stores no values from the system of record
+  and no agent text, only field names, match results and a hash of the agent's
+  message. Pass `keep_fields=["status"]` to keep named fields, or
+  `keep_fields="*"` for synthetic data. `Claim.context` is stored as given, so
+  keep personal data out of it. Decide where the log lives and who can read it
+  before pointing Readback at a system that holds personal data.
+- **Crashes still leave evidence.** If the agent raises inside the `watch`
+  block, the check still runs and the verdict is logged before the exception
+  propagates.
 
-Truncation (dropping the newest records) cannot be seen from the file alone,
-so anchor the head outside it. `FileAnchor` rewrites a small file with the
-record count and head hash after every append; put that file where the log
-writer cannot change it (another volume or account, a synced or append-only
-store). Any callable `anchor(count, head)` works, for example one that posts to
-a ticket or a KMS-signed store. A failed anchor never breaks the agent: it
-warns and sets `log.anchor_error`.
+### Detecting truncation
+
+Dropping the newest records cannot be seen from the file alone, so anchor the
+head outside it. `FileAnchor` rewrites a small file with the record count and
+head hash after every append; put that file where the log writer cannot change
+it (another volume or account, a synced or append-only store). Any callable
+`anchor(count, head)` works, for example one that posts to a ticket or a
+KMS-signed store. A failed anchor never breaks the agent: it warns and sets
+`log.anchor_error`.
 
 ```python
 from agent_readback import EvidenceLog, FileAnchor
@@ -271,17 +275,6 @@ Records added after the anchored head are reported, not rejected. Whoever can
 edit both the log and the anchor can still truncate undetected, and without a
 key they can also forge new records after the anchored head.
 
-By default the log stores no values from the system of record and no agent
-text, only field names, match results and a hash of the agent's message. Pass
-`keep_fields=["status"]` to keep named fields, or `keep_fields="*"` for
-synthetic data. `Claim.context` is stored as given, so keep personal data out
-of it. Decide where the log lives and who can read it before pointing Readback
-at a system that holds personal data.
-
-If the agent raises inside the `watch` block, the check still runs and the
-verdict is still logged before the exception propagates: a crash after a write
-leaves evidence, not a gap.
-
 ## Security model
 
 What Readback protects: the integrity of the evidence (it is the audit proof),
@@ -297,13 +290,13 @@ restricted key with `refunds: read`, a database role with `SELECT` only).
 | Agent claims success, system disagrees | Independent read-back; verdict is deterministic, never from an LLM |
 | Agent crashes after writing | `watch` still checks and logs before the exception propagates |
 | Evidence record edited, deleted or reordered | Sequence number + hash chain; `verify-log` reports the first bad record |
-| Whole chain rewritten by someone with file access | HMAC-SHA256 with `READBACK_LOG_KEY`; a chain built without the key fails verification. Without the key, an OK is labelled `UNKEYED` (not forgery-proof); `--require-key` makes audits fail instead. Keyed records carry `"mac": "hmac-sha256"`, so a keyed log checked without its key says so rather than "edited" |
-| Newest records dropped | Not detectable from the file alone. `EvidenceLog(anchor=FileAnchor(...))` records the count and head after every append; `verify-log --anchor FILE` or `--head HASH` reports BROKEN when the anchored head is missing. The anchor must live where the log writer cannot change it |
+| Whole chain rewritten by someone with file access | HMAC-SHA256 with `READBACK_LOG_KEY`; a chain built without the key fails verification (see note 1) |
+| Newest records dropped | `EvidenceLog(anchor=FileAnchor(...))` plus `verify-log --anchor FILE` or `--head HASH` reports BROKEN when the anchored head is missing; the anchor must live where the log writer cannot change it |
 | Personal data in the log | Redacted by default: no observed values, no agent text (keyed digest only), expected values replaced unless named in `keep_fields` |
-| Verifier given a key that can also write | `StripeRefundVerifier` refuses a client that sends a secret key (`sk_live_` or `sk_test_`, Basic or Bearer); use a restricted `rk_` key with refunds read. It checks the prefix of static keys only (httpx `BasicAuth` or a Bearer header; custom auth flows are never run during the check and their keys are not seen) and cannot prove an `rk_` key is read-only |
-| Other Windows accounts reading the log | Mode `0600` does nothing on Windows, so a new log is created empty, has every existing access entry (explicit and inherited) removed with `icacls` and is granted to this process's own SID (read from its access token with `whoami`; System32 located with `GetSystemDirectoryW`; `USERNAME`, `SystemRoot` and `PATH` are never used), all before the first record is written. If that fails the log is still written and a `RuntimeWarning` says so. A process that opens the file in the instant between creation and restriction keeps its handle: put logs in a folder only you can access. Logs created before this change and anchor files keep their folder's access |
+| Verifier given a key that can also write | `StripeRefundVerifier` refuses a client that sends a Stripe secret key (`sk_live_`, `sk_test_`); use a restricted `rk_` key with refunds read (see note 2) |
+| Other Windows accounts reading the log | A new log is restricted to the process's own account before its first record is written (see note 3) |
 | Alert spoofing | `WebhookAlert` signs every body with `X-Readback-Signature: sha256=<HMAC>` when `READBACK_ALERT_KEY` is set; receivers must check it |
-| Alert receiver forging the log | The alert key is separate from `READBACK_LOG_KEY` and the log key is never used for alerts. `WebhookAlert` refuses a key equal to `READBACK_LOG_KEY` or to a key passed to any `EvidenceLog` in the same process, at creation and before each send. It cannot see keys used only by other processes: keep explicit log and alert keys separate yourself |
+| Alert receiver forging the log | The alert key is separate from `READBACK_LOG_KEY` and the log key is never used for alerts (see note 4) |
 | Server-supplied paging link sends the verifier's token elsewhere | Each FHIR next link is resolved the way httpx will send it (so `//host/x` and similar forms count) and must stay on the client's scheme, host and port; anything else is `unverified` and is never requested |
 | Evidence log overwritten by the dashboard | `readback dashboard` refuses an output path that is the log itself or any existing `.jsonl` |
 | Hostile or broken server pages forever | FHIR and Stripe reads are page-capped; the result is `unverified`, not a hang |
@@ -311,14 +304,90 @@ restricted key with `refunds: read`, a database role with `SELECT` only).
 | Verifier overloading the system of record | Opt-in `limit_reads(..., RateLimit(...))` caps every read; it only delays reads, and with `max_wait` an over-long wait is `unverified`, never `failed` (see [Rate limiting the verifier's reads](#rate-limiting-the-verifiers-reads)) |
 | Unreadable system of record | `unverified`, never `verified` and never `failed` |
 
+Notes:
+
+1. Without the key, an OK result is labelled `UNKEYED` (not forgery-proof);
+   `--require-key` makes audits fail instead. Keyed records carry
+   `"mac": "hmac-sha256"`, so a keyed log checked without its key says so
+   rather than "edited".
+2. The check looks only at the key's prefix, and only for static keys (exactly
+   httpx `BasicAuth`, not a subclass, or a Bearer header); custom auth flows are
+   never run during the check and their keys are not seen. A prefix cannot
+   prove an `rk_` key is read-only.
+3. Mode `0600` does nothing on Windows. A new log is created empty, has every
+   existing access entry (explicit and inherited) removed with `icacls`, and is
+   granted to the SID of the process's own access token, read with `whoami`.
+   System32 is located with `GetSystemDirectoryW`; `USERNAME`, `SystemRoot` and
+   `PATH` are never used. If that fails the log is still written and a
+   `RuntimeWarning` says so. A process that opens the file in the instant
+   between creation and restriction keeps its handle, so put logs in a folder
+   only you can access. Logs created before this change and anchor files keep
+   their folder's access.
+4. `WebhookAlert` refuses a key equal to `READBACK_LOG_KEY` or to a key passed
+   to any `EvidenceLog` in the same process, at creation and before each send.
+   It cannot see keys used only by other processes: keep explicit log and alert
+   keys separate yourself.
+
 Known limits: `Claim.context` is stored as given; `Verdict.observed` holds
 real values in memory (do not print it in production logs); a pending Stripe
 refund is `unverified` until you `recheck` it, and scheduling that is up to
-you; rate limiting is opt-in (`limit_reads`) and does not retry a 429. No external security or compliance review has been done.
+you; rate limiting is opt-in (`limit_reads`) and does not retry a 429. No
+external security or compliance review has been done.
 
-## Repeat sandbox validation
+## What is tested and what is not
 
-Run from this directory with fresh output paths:
+Version 0.3.0. All 162 offline tests pass with the optional test dependencies
+installed. A separate public HAPI FHIR R4 sandbox run verified 10 scripted
+operations (6 bookings, 1 reschedule, 3 cancellations); this is a
+compatibility smoke test, not production validation. A Stripe test-mode run
+produced the expected verdict for all four refund scenarios, using a separate
+restricted key that was confirmed unable to create refunds.
+
+| Part | Tested against | Not yet tested against |
+|---|---|---|
+| FHIR appointment verifier (create, update, cancel) | In-memory mock, incomplete pagination, stale-search regression, off-server next links; injected drop, wrong-time, wrong-practitioner and duplicate faults; public HAPI R4 sandbox smoke test | A production EHR, authenticated read-only isolation |
+| Stripe refund verifier and sandbox runner | Mock refunds endpoint; test-key guards; Stripe test mode with a read-only restricted key: success, missing, wrong-amount and duplicate scenarios | Live mode, a refund left pending by the bank |
+| SQL row verifier | SQLite, including insert with concurrent deletion | Postgres or any other database |
+| Anthropic and OpenAI-compatible agent loops | Mock responses for each API's message format, Responses tool-call chaining with and without storage, a once-per-evaluation warning for a model HTTP 400; live runs in [Results with real models](#results-with-real-models) | Reasoning efforts other than `none` and `medium`; LangGraph with other models |
+| `watched()` adapters | Sync and async functions, off-loop verifier reads when an async tool raises, a verdict even when an AnyIO cancel scope cancels the tool after it writes, objects with `async def __call__` | |
+| MCP | MCP 1.30 and 2.3 `ClientSession` against in-memory FastMCP, a local stdio subprocess, and the same server over Streamable HTTP on 127.0.0.1, both backed by SQLite; over HTTP a booking the agent misdescribes is `failed` on the field read back from the database | MCP over HTTP to a remote host, with TLS or auth |
+| LangGraph | LangGraph 0.2 and 1.2: a wrapped `StateGraph` node, a wrapped LangChain tool in `ToolNode`, and a full agent/`ToolNode` loop (`examples/healthcare/langgraph_agent.py`) that catches every false DONE under injected faults | |
+| Evidence log, redaction, report, dashboard, webhook | Unit tests, including HTML escaping of hostile context values and a BROKEN dashboard for a tampered log | Production load |
+
+No security or compliance review has been done.
+
+## Development
+
+```bash
+pip install -e ".[dev]"
+pytest
+pip install -e ".[security]" && python -m bandit -r agent_readback examples -q && python -m pip_audit --skip-editable
+```
+
+### Measure a real model
+
+Keep the key in your shell environment. Do not put it in a file you commit.
+
+```bash
+export ANTHROPIC_API_KEY=...
+python -m examples.healthcare.run_eval --provider anthropic --model claude-haiku-5-5 --runs 100 --out results-haiku.json
+
+export OPENAI_API_KEY=...
+python -m examples.healthcare.run_eval --provider openai --model gpt-6-luna --reasoning-effort none --runs 100 --out results-luna.json
+python -m examples.healthcare.run_eval --provider openai-responses --model gpt-6-luna --reasoning-effort medium --runs 100 --out results-luna-reasoning.json
+```
+
+Add `--no-store` to the Responses command to send the conversation and
+encrypted reasoning with each tool follow-up instead of using stored response
+IDs. The agent receives requests in plain English with Central Time dates,
+must convert them to UTC, and must find the right appointment before changing
+it. With no injected faults, every false completion in the result is the
+model's own. Add `--fhir-url <base URL>` to run against a real FHIR R4 test
+server; only synthetic patients and practitioners are created.
+
+### Repeat sandbox validation
+
+Run from the repository root with fresh output paths:
 
 ```bash
 python -m examples.healthcare.run_eval --provider scripted --runs 10 --seed 7 --fhir-url https://hapi.fhir.org/baseR4 --log fhir-evidence.jsonl --out fhir-results.json
@@ -338,15 +407,15 @@ effects. It retains test objects and writes redacted evidence by default.
 These are small compatibility checks, not load tests.
 
 The public FHIR sandbox permits anonymous writes, so this check does not
-validate credential isolation. Only synthetic records are created and retained.
-The initial run exposed cached pre-write searches; the verifier now requests
-fresh reads with `Cache-Control: no-cache`. After that change, all 10 operations
-verified, and the evidence chain was intact.
+validate credential isolation. Only synthetic records are created and
+retained. The initial run exposed cached pre-write searches; the verifier now
+requests fresh reads with `Cache-Control: no-cache`. After that change, all
+10 operations verified, and the evidence chain was intact.
 
-## Project layout
+### Project layout
 
 ```
-agent_readback/             core types, adapters, evidence log, report, dashboard, CLI
+agent_readback/             core types, adapters, evidence log, rate limiting, report, dashboard, CLI
 agent_readback/verifiers/   FHIR, Stripe, SQL
 examples/healthcare/        mock FHIR server, agent tools, model providers, evaluation runner, LangGraph agent
 examples/stripe_sandbox.py  Stripe test-mode validation runner
