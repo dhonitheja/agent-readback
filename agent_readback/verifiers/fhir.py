@@ -37,8 +37,24 @@ def normalize_instant(value: Any) -> Any:
     return parsed.astimezone(timezone.utc).isoformat()
 
 
+def _object(value: Any, what: str) -> dict[str, Any]:
+    # Server JSON is untrusted: a wrong shape is a read error (unverified), never a crash.
+    if not isinstance(value, dict):
+        raise ValueError(f"malformed FHIR response: {what} is not an object")
+    return value
+
+
+def _array(value: Any, what: str) -> list[Any]:
+    if not isinstance(value, list):
+        raise ValueError(f"malformed FHIR response: {what} is not a list")
+    return value
+
+
 def flatten_appointment(resource: dict[str, Any]) -> dict[str, Any]:
     """Reduce a FHIR Appointment to the flat fields a claim can assert on."""
+    resource = _object(resource, "Appointment")
+    if not isinstance(resource.get("id"), (str, type(None))):
+        raise ValueError("malformed FHIR response: Appointment.id is not a string")
     flat: dict[str, Any] = {
         "id": resource.get("id"),
         "status": resource.get("status"),
@@ -47,8 +63,11 @@ def flatten_appointment(resource: dict[str, Any]) -> dict[str, Any]:
         "patient": None,
         "practitioner": None,
     }
-    for participant in resource.get("participant", []):
-        reference = (participant.get("actor") or {}).get("reference", "")
+    for participant in _array(resource.get("participant", []), "Appointment.participant"):
+        actor = _object(_object(participant, "participant").get("actor") or {}, "participant.actor")
+        reference = actor.get("reference", "")
+        if not isinstance(reference, str):
+            raise ValueError("malformed FHIR response: actor.reference is not a string")
         if reference.startswith("Patient/"):
             flat["patient"] = reference
         elif reference.startswith("Practitioner/"):
@@ -74,11 +93,14 @@ class FhirAppointmentVerifier:
             # HAPI can reuse a pre-write search bundle for the same query.
             response = self.client.get(url, params=params, headers={"Cache-Control": "no-cache"})
             response.raise_for_status()
-            bundle = response.json()
-            for entry in bundle.get("entry", []):
-                flat = flatten_appointment(entry["resource"])
+            bundle = _object(response.json(), "search Bundle")
+            for entry in _array(bundle.get("entry", []), "Bundle.entry"):
+                flat = flatten_appointment(_object(entry, "Bundle.entry item")["resource"])
                 found[flat["id"] or f"<no-id>#{len(found)}"] = flat  # keep id-less entries distinct
-            url = next((l["url"] for l in bundle.get("link", []) if l.get("relation") == "next"), None)
+            links = [_object(link, "Bundle.link item") for link in _array(bundle.get("link", []), "Bundle.link")]
+            url = next((link["url"] for link in links if link.get("relation") == "next"), None)
+            if url is not None and not isinstance(url, str):
+                raise ValueError("malformed FHIR response: next link url is not a string")
             params = None
             if not url:
                 break

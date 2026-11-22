@@ -4,6 +4,15 @@ All notable changes to `agent-readback`. Dates are UTC.
 
 ## Unreleased
 
+### Fixed
+
+- A malformed FHIR or Stripe response (for example a list where an object is
+  expected, a string entry, or a non-string id or reference) made the verifier
+  raise `AttributeError` or `TypeError` out of `watch()`, breaking the agent's
+  call. Responses are now shape-checked where they are parsed and anything
+  malformed is `unverified`. A Stripe refund page that repeats now stops after
+  the second request instead of after `MAX_PAGES`.
+
 ### Documentation
 
 - README reworked as a front page: quick start near the top, a results table,

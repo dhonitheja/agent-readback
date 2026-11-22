@@ -397,3 +397,33 @@ def test_stripe_key_check_does_not_run_a_basic_auth_subclass_flow():
 
     transport = httpx.MockTransport(lambda request: httpx.Response(200, json={"data": [], "has_more": False}))
     StripeRefundVerifier(httpx.Client(transport=transport, auth=CustomBasic("rk_live_x", "")))
+
+
+MALFORMED_REFUND_PAGES = {
+    "page is a list": [],
+    "refund is a string": {"data": ["re_1"], "has_more": False},
+    "refund id is a number": {"data": [{"id": 7}], "has_more": False},
+    "has_more is a string": {"data": [], "has_more": "false"},
+    "data is an object": {"data": {"id": "re_1"}, "has_more": False},
+}
+
+
+@pytest.mark.parametrize("body", MALFORMED_REFUND_PAGES.values(), ids=MALFORMED_REFUND_PAGES.keys())
+def test_malformed_stripe_page_is_unverified_not_a_crash(body):
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, json=body))
+    with httpx.Client(transport=transport, base_url="https://stripe.test") as client:
+        verifier = StripeRefundVerifier(client)
+        assert verifier.snapshot(REFUND) is None
+        assert verifier.check(REFUND, set()).status is Status.UNVERIFIED
+
+
+def test_stripe_snapshot_stops_when_pagination_repeats():
+    cursors = []
+
+    def handle(request):
+        cursors.append(request.url.params.get("starting_after"))
+        return httpx.Response(200, json={"data": [{"id": "re_1"}], "has_more": True})
+
+    with httpx.Client(transport=httpx.MockTransport(handle), base_url="https://stripe.test") as client:
+        assert StripeRefundVerifier(client).snapshot(REFUND) is None
+    assert cursors == [None, "re_1"]  # two requests, not MAX_PAGES

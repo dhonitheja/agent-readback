@@ -263,3 +263,34 @@ def test_odd_next_links_never_crash_the_snapshot(link):
     with httpx.Client(transport=httpx.MockTransport(handle), base_url="https://fhir.test") as client:
         result = FhirAppointmentVerifier(client).snapshot(create_claim())
     assert result in (set(), None)  # followed, or refused as unverified; never an exception
+
+
+MALFORMED_BUNDLES = {
+    "bundle is a list": [],
+    "entry is a string": {"resourceType": "Bundle", "entry": "x"},
+    "entry item is a string": {"resourceType": "Bundle", "entry": ["x"]},
+    "resource is a string": {"resourceType": "Bundle", "entry": [{"resource": "x"}]},
+    "id is an object": {"resourceType": "Bundle", "entry": [{"resource": {"id": {"x": 1}}}]},
+    "participant is a string": {"resourceType": "Bundle", "entry": [{"resource": {"id": "a1", "participant": "x"}}]},
+    "actor reference is a number": {"resourceType": "Bundle", "entry": [{"resource": {"id": "a1", "participant": [{"actor": {"reference": 7}}]}}]},
+    "link is a string": {"resourceType": "Bundle", "entry": [], "link": "next"},
+    "link item is a string": {"resourceType": "Bundle", "entry": [], "link": ["next"]},
+    "next url is a number": {"resourceType": "Bundle", "entry": [], "link": [{"relation": "next", "url": 5}]},
+}
+
+
+@pytest.mark.parametrize("body", MALFORMED_BUNDLES.values(), ids=MALFORMED_BUNDLES.keys())
+def test_malformed_fhir_search_is_unverified_not_a_crash(body):
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, json=body))
+    with httpx.Client(transport=transport, base_url="https://fhir.test") as client:
+        verifier = FhirAppointmentVerifier(client)
+        assert verifier.snapshot(create_claim()) is None
+        assert verifier.check(create_claim(), set()).status is Status.UNVERIFIED
+
+
+def test_malformed_fhir_read_by_id_is_unverified_not_a_crash(server, tools):
+    from agent_readback.verifiers.fhir import flatten_appointment
+
+    for bad in ([], "x", {"id": "a1", "participant": [42]}):
+        with pytest.raises(ValueError, match="malformed FHIR response"):
+            flatten_appointment(bad)
