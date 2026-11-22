@@ -339,12 +339,20 @@ def test_outcome_and_include_entries_are_not_counted_as_appointments():
     assert verdict.status is Status.VERIFIED and [item["id"] for item in verdict.observed["created"]] == ["a1"]
 
 
-def test_timestamp_without_a_utc_form_is_a_mismatch_not_a_crash():
-    assert normalize_instant("0001-01-01T00:00:00+01:00") == "0001-01-01T00:00:00+01:00"
+@pytest.mark.parametrize("claimed, status", [
+    ("0001-01-01T00:00:00+01:00", Status.VERIFIED),  # identical text matches
+    ("0001-01-01T01:00:00+02:00", Status.FAILED),    # same instant written another way does not
+    (START, Status.FAILED),                          # a different instant does not
+])
+def test_timestamp_without_a_utc_form_is_compared_as_written_not_a_crash(claimed, status):
+    stored = "0001-01-01T00:00:00+01:00"  # year 1 at +01:00 has no UTC form
+    assert normalize_instant(stored) == stored
     pages = [{"resourceType": "Bundle", "entry": []},
-             {"resourceType": "Bundle", "entry": [_bundle_appointment("a1", "0001-01-01T00:00:00+01:00")]}]
+             {"resourceType": "Bundle", "entry": [_bundle_appointment("a1", stored)]}]
     transport = httpx.MockTransport(lambda request: httpx.Response(200, json=pages.pop(0) if len(pages) > 1 else pages[0]))
     with httpx.Client(transport=transport, base_url="https://fhir.test") as client:
         verifier = FhirAppointmentVerifier(client)
-        verdict = verifier.check(create_claim(), verifier.snapshot(create_claim()))
-    assert verdict.status is Status.FAILED and [f.field for f in verdict.findings] == ["start"]
+        claim = create_claim(start=claimed)
+        verdict = verifier.check(claim, verifier.snapshot(claim))
+    assert verdict.status is status
+    assert [f.field for f in verdict.findings] == ([] if status is Status.VERIFIED else ["start"])
