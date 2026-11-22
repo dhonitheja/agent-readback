@@ -294,3 +294,32 @@ def test_malformed_fhir_read_by_id_is_unverified_not_a_crash(server, tools):
     for bad in ([], "x", {"id": "a1", "participant": [42]}):
         with pytest.raises(ValueError, match="malformed FHIR response"):
             flatten_appointment(bad)
+
+
+def _bundle_appointment(appointment_id, start=START):
+    return {"resource": {"resourceType": "Appointment", "id": appointment_id, "status": "booked", "start": start,
+                         "end": END, "participant": [{"actor": {"reference": PATIENT}}, {"actor": {"reference": DOCTOR}}]}}
+
+
+@pytest.mark.parametrize("next_link", [{"relation": "next", "url": None}, {"relation": "next", "url": ""}, {"relation": "next"}])
+def test_next_link_without_a_usable_url_is_an_incomplete_read_not_verified(next_link):
+    # The duplicate booking would be on page 2; a next link we cannot follow must not end the search as complete.
+    pages = [{"resourceType": "Bundle", "entry": []},
+             {"resourceType": "Bundle", "entry": [_bundle_appointment("a1")], "link": [next_link]}]
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, json=pages.pop(0) if len(pages) > 1 else pages[0]))
+    with httpx.Client(transport=transport, base_url="https://fhir.test") as client:
+        verifier = FhirAppointmentVerifier(client)
+        before = verifier.snapshot(create_claim())
+        assert before == set()
+        assert verifier.check(create_claim(), before).status is Status.UNVERIFIED
+
+
+def test_timestamp_without_a_utc_form_is_a_mismatch_not_a_crash():
+    assert normalize_instant("0001-01-01T00:00:00+01:00") == "0001-01-01T00:00:00+01:00"
+    pages = [{"resourceType": "Bundle", "entry": []},
+             {"resourceType": "Bundle", "entry": [_bundle_appointment("a1", "0001-01-01T00:00:00+01:00")]}]
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, json=pages.pop(0) if len(pages) > 1 else pages[0]))
+    with httpx.Client(transport=transport, base_url="https://fhir.test") as client:
+        verifier = FhirAppointmentVerifier(client)
+        verdict = verifier.check(create_claim(), verifier.snapshot(create_claim()))
+    assert verdict.status is Status.FAILED and [f.field for f in verdict.findings] == ["start"]

@@ -34,7 +34,10 @@ def normalize_instant(value: Any) -> Any:
         return value
     if parsed.tzinfo is None:
         return value  # a time with no zone is ambiguous; leave it so it shows as a mismatch
-    return parsed.astimezone(timezone.utc).isoformat()
+    try:
+        return parsed.astimezone(timezone.utc).isoformat()
+    except OverflowError:
+        return value  # e.g. year 1 at +01:00 has no UTC form; leave it so it shows as a mismatch
 
 
 def _object(value: Any, what: str) -> dict[str, Any]:
@@ -98,9 +101,11 @@ class FhirAppointmentVerifier:
                 flat = flatten_appointment(_object(entry, "Bundle.entry item")["resource"])
                 found[flat["id"] or f"<no-id>#{len(found)}"] = flat  # keep id-less entries distinct
             links = [_object(link, "Bundle.link item") for link in _array(bundle.get("link", []), "Bundle.link")]
-            url = next((link["url"] for link in links if link.get("relation") == "next"), None)
-            if url is not None and not isinstance(url, str):
-                raise ValueError("malformed FHIR response: next link url is not a string")
+            nexts = [link for link in links if link.get("relation") == "next"]
+            url = nexts[0].get("url") if nexts else None
+            if nexts and (not isinstance(url, str) or not url):
+                # A next link we cannot follow means pages are unread: never treat that as complete.
+                raise ValueError("malformed FHIR response: next link has no usable url")
             params = None
             if not url:
                 break

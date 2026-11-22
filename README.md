@@ -307,7 +307,7 @@ restricted key with `refunds: read`, a database role with `SELECT` only).
 | Server-supplied paging link sends the verifier's token elsewhere | Each FHIR next link is resolved the way httpx will send it (so `//host/x` and similar forms count) and must stay on the client's scheme, host and port; anything else is `unverified` and is never requested |
 | Evidence log overwritten by the dashboard | `readback dashboard` refuses an output path that is the log itself or any existing `.jsonl` |
 | Hostile or broken server pages forever | FHIR and Stripe reads are page-capped; the result is `unverified`, not a hang |
-| Malformed server response | FHIR and Stripe responses are shape-checked where they are parsed (objects, lists, string ids and references); anything else is `unverified`, never a crash. A Stripe page that repeats stops after the second request |
+| Malformed or incomplete server response | The FHIR and Stripe fields the verifiers read are shape-checked where they are parsed (objects, lists, string ids, references and next links); a wrong shape is `unverified`. A read that cannot be completed, such as a FHIR next link with no usable URL or a Stripe page that promises more but is empty, is `unverified`, never `verified`. A Stripe page that repeats stops after the second request; a timestamp with no UTC form shows as a mismatch |
 | SQL injection via claim or config | Table and column names come from your code and are pattern-checked; the `placeholder` must be a DB-API paramstyle (`?`, `%s`, `:name`, `:1`, `$1`); values are always bound parameters |
 | Verifier overloading the system of record | Opt-in `limit_reads(..., RateLimit(...))` caps every read; it only delays reads, and with `max_wait` an over-long wait is `unverified`, never `failed` (see [Rate limiting the verifier's reads](#rate-limiting-the-verifiers-reads)) |
 | Unreadable system of record | `unverified`, never `verified` and never `failed` |
@@ -344,7 +344,7 @@ external security or compliance review has been done.
 
 ## What is tested and what is not
 
-Version 0.3.0 plus unreleased fixes. All 179 offline tests pass with the optional test dependencies
+Version 0.3.0 plus unreleased fixes. All 184 offline tests pass with the optional test dependencies
 installed. A separate public HAPI FHIR R4 sandbox run verified 10 scripted
 operations (6 bookings, 1 reschedule, 3 cancellations); this is a
 compatibility smoke test, not production validation. A Stripe test-mode run

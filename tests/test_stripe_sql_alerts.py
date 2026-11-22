@@ -427,3 +427,16 @@ def test_stripe_snapshot_stops_when_pagination_repeats():
     with httpx.Client(transport=httpx.MockTransport(handle), base_url="https://stripe.test") as client:
         assert StripeRefundVerifier(client).snapshot(REFUND) is None
     assert cursors == [None, "re_1"]  # two requests, not MAX_PAGES
+
+
+def test_has_more_with_an_empty_page_is_an_incomplete_read_not_verified():
+    # A double refund could be on the page that was never read: that must not be verified.
+    refund = {"id": "re_1", "amount": REFUND.expected["amount"], "currency": REFUND.expected["currency"],
+              "status": "succeeded", "payment_intent": REFUND.expected["payment_intent"]}
+    pages = [{"data": [], "has_more": False}, {"data": [refund], "has_more": True}, {"data": [], "has_more": True}]
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, json=pages.pop(0) if len(pages) > 1 else pages[0]))
+    with httpx.Client(transport=transport, base_url="https://stripe.test") as client:
+        verifier = StripeRefundVerifier(client)
+        before = verifier.snapshot(REFUND)
+        assert before == set()
+        assert verifier.check(REFUND, before).status is Status.UNVERIFIED

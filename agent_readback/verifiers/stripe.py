@@ -80,8 +80,10 @@ class StripeRefundVerifier:
                 if not isinstance(item, dict) or not isinstance(item.get("id"), str) or not item["id"]:
                     raise ValueError("malformed Stripe response: refund without a string id")
                 found[item["id"]] = {name: item.get(name) for name in FIELDS}
-            if not has_more or not items:
+            if not has_more:
                 return found
+            if not items:  # more pages promised but no cursor to reach them: an incomplete read
+                raise ValueError("malformed Stripe response: has_more is true but the page is empty")
             cursor = items[-1]["id"]
             if cursor in cursors:  # the server repeats a page: stop now, not after MAX_PAGES requests
                 raise ValueError("Stripe refund pagination did not advance")
