@@ -372,7 +372,7 @@ def test_new_log_is_readable_only_by_its_owner(tmp_path):
         return
     acl = subprocess.run(["icacls", str(path)], capture_output=True, text=True, check=True).stdout
     grants = [line for line in acl.splitlines() if ":(" in line]
-    assert len(grants) == 1 and "(I)" not in acl  # one explicit grant, nothing inherited
+    assert len(grants) == 1 and "(I)" not in acl, acl  # one explicit grant, nothing inherited
     assert os.environ["USERNAME"].lower() in grants[0].lower()
     for other in ("Everyone", "Users", "Authenticated Users", "Administrators", "SYSTEM"):
         assert f"\\{other}:" not in acl and f" {other}:" not in acl
