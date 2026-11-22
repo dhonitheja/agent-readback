@@ -14,6 +14,7 @@ makes that read ``unverified``, as any read error does.
 
 from __future__ import annotations
 
+import math
 import threading
 import time
 from typing import Any, Callable, TypeVar
@@ -65,7 +66,9 @@ class RateLimit:
             now = self._clock()
             start = max(self._next_free, now)
             wait = start - (self.burst - 1) * self.interval - now
-            wait = wait if wait > 1e-9 else 0.0  # float rounding must not refuse a read inside a fresh burst
+            # Float rounding must not refuse a read inside a fresh burst. The error grows
+            # with the clock's magnitude (monotonic() counts from boot), so scale with it.
+            wait = wait if wait > 1e-9 + 64 * math.ulp(start) else 0.0
             if self.max_wait is not None and wait > self.max_wait:
                 raise RateLimitTimeout(f"read rate limit: would wait {wait:.2f}s, more than max_wait {self.max_wait}s")
             self._next_free = start + self.interval

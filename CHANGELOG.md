@@ -71,7 +71,9 @@ All notable changes to `agent-readback`. Dates are UTC.
   and stops the first evidence append; it is decoded tolerantly and any
   failure warns.
 - `RateLimit(..., max_wait=0)` no longer refuses a read inside a fresh burst
-  because of floating-point rounding (a wait under 1 ns counts as none).
+  because of floating-point rounding. A rounding-sized wait counts as none;
+  the cutoff scales with the clock value, since `time.monotonic()` counts
+  from boot and its rounding error grows with uptime.
 - The LangGraph example classifies a `FAILED` reply by the task verdict when
   there is one, as `run_eval` does: writes that held at the wrong time are
   `reported_failure`, not `said_failed_but_actually_done`.
