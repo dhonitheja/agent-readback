@@ -459,3 +459,23 @@ def test_explicit_access_entries_on_a_new_log_are_removed_too(tmp_path):
     acl = subprocess.run([icacls, str(path)], capture_output=True, text=True, check=True).stdout
     grants = [line for line in acl.splitlines() if ":(" in line]
     assert len(grants) == 1 and "BUILTIN\\Users" not in acl, acl  # the path itself contains "Users"
+
+
+def test_undecodable_tool_output_cannot_stop_the_first_append(tmp_path, monkeypatch):
+    import os
+    import subprocess
+
+    if os.name != "nt":
+        pytest.skip("owner-only access uses icacls on Windows only")
+    calls = []
+
+    def run(args, **kwargs):
+        calls.append(kwargs)
+        raise UnicodeDecodeError("cp1252", b"\x81", 0, 1, "undefined byte in a localized message")
+
+    monkeypatch.setattr(subprocess, "run", run)
+    path = tmp_path / "log.jsonl"
+    with pytest.warns(RuntimeWarning, match="could not restrict"):
+        EvidenceLog(path).append(verdict(0))  # used to raise out of append
+    assert EvidenceLog(path).verify_chain() == (True, None)
+    assert calls and calls[0].get("errors") == "replace"  # real output is decoded tolerantly

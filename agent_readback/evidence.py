@@ -128,7 +128,7 @@ def _owner_only(path: Path) -> None:
     try:
         if not failed:  # whoami reads the SID from this process's own access token
             run = lambda *args: subprocess.run(  # noqa: E731  # absolute executable, list args  # nosec B603
-                [str(system32 / args[0]), *args[1:]], capture_output=True, text=True, timeout=30
+                [str(system32 / args[0]), *args[1:]], capture_output=True, text=True, errors="replace", timeout=30
             )
             who = run("whoami.exe", "/user", "/fo", "csv", "/nh")
             sid = who.stdout.strip().rsplit(",", 1)[-1].strip('"') if who.returncode == 0 else ""
@@ -143,7 +143,7 @@ def _owner_only(path: Path) -> None:
                     if result.returncode != 0:  # icacls can fail without printing anything
                         failed = (result.stderr or result.stdout).strip() or f"icacls exited with {result.returncode}"
                         break
-    except (OSError, subprocess.SubprocessError) as error:
+    except (OSError, subprocess.SubprocessError, ValueError) as error:  # ValueError: e.g. UnicodeDecodeError
         failed = str(error)
     if failed:
         warnings.warn(f"could not restrict {path} to the current user: {failed}", RuntimeWarning, stacklevel=5)

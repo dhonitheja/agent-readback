@@ -29,7 +29,10 @@ class RateLimitTimeout(httpx.TimeoutException):
 
 
 class RateLimit:
-    """Token bucket: at most ``burst`` reads at once, refilled at ``per_second``. Thread-safe.
+    """Token bucket (GCRA): bursts of up to ``burst`` reads, long-run rate ``per_second``. Thread-safe.
+
+    It spaces reservations, not start times: callers that wake late from their
+    sleep can start together. The long-run rate still holds.
 
     With ``max_wait`` (seconds), a read that would wait longer is not made: it
     raises ``RateLimitTimeout`` at once, uses no slot, and the verdict is

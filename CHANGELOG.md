@@ -66,6 +66,10 @@ All notable changes to `agent-readback`. Dates are UTC.
 
 ### Fixed
 
+- On Windows, output from `whoami`/`icacls` that cannot be decoded (for
+  example a non-ASCII account name in another code page) no longer escapes
+  and stops the first evidence append; it is decoded tolerantly and any
+  failure warns.
 - `RateLimit(..., max_wait=0)` no longer refuses a read inside a fresh burst
   because of floating-point rounding (a wait under 1 ns counts as none).
 - The LangGraph example classifies a `FAILED` reply by the task verdict when
