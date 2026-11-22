@@ -36,7 +36,7 @@ def test_readback_bypasses_cached_prewrite_search(server, tools):
 def test_incomplete_pagination_is_unverified():
     def handle(request):
         return httpx.Response(200, json={
-            "entry": [],
+            "resourceType": "Bundle", "entry": [],
             "link": [{"relation": "next", "url": "Appointment?page=next"}],
         })
 
@@ -180,10 +180,14 @@ def test_agent_exception_still_produces_a_verdict_and_a_log_record(server, tools
     assert len(log.records()) == 1
 
 
-def test_resources_without_an_id_are_not_collapsed():
+def test_appointment_without_an_id_is_a_read_error():
+    # Keying id-less entries by position let an unchanged one look new at check time.
     from agent_readback.verifiers.fhir import flatten_appointment
 
-    assert flatten_appointment({"status": "booked"})["id"] is None
+    for bad in ({"resourceType": "Appointment", "status": "booked"}, {"resourceType": "Appointment", "id": ""},
+                {"resourceType": "Appointment", "id": "   "}):
+        with pytest.raises(ValueError, match="malformed FHIR response"):
+            flatten_appointment(bad)
 
 
 def test_foreign_next_link_never_receives_the_read_only_token():
@@ -192,7 +196,7 @@ def test_foreign_next_link_never_receives_the_read_only_token():
     def handle(request):
         hosts.append((request.url.host, request.headers.get("Authorization")))
         return httpx.Response(200, json={
-            "entry": [],
+            "resourceType": "Bundle", "entry": [],
             "link": [{"relation": "next", "url": "https://attacker.test/steal?page=2"}],
         })
 
@@ -210,9 +214,9 @@ def test_absolute_next_link_on_the_same_server_is_followed():
     def handle(request):
         pages.append(str(request.url))
         if "page=2" in str(request.url):
-            return httpx.Response(200, json={"entry": []})
+            return httpx.Response(200, json={"resourceType": "Bundle", "entry": []})
         return httpx.Response(200, json={
-            "entry": [],
+            "resourceType": "Bundle", "entry": [],
             "link": [{"relation": "next", "url": "https://fhir.test/Appointment?page=2"}],
         })
 
@@ -227,7 +231,7 @@ def test_odd_next_links_are_judged_by_where_httpx_sends_them(link):
 
     def handle(request):
         hosts.append(str(request.url))
-        return httpx.Response(200, json={"entry": [], "link": [{"relation": "next", "url": link}]})
+        return httpx.Response(200, json={"resourceType": "Bundle", "entry": [], "link": [{"relation": "next", "url": link}]})
 
     with httpx.Client(transport=httpx.MockTransport(handle), base_url="https://fhir.test") as client:
         verifier = FhirAppointmentVerifier(client)
@@ -245,8 +249,8 @@ def test_root_relative_next_link_is_not_appended_to_the_base_path():
     def handle(request):
         paths.append(request.url.path)
         if request.url.params.get("page") == "2":
-            return httpx.Response(200, json={"entry": []})
-        return httpx.Response(200, json={"entry": [], "link": [{"relation": "next", "url": "/r4/Appointment?page=2"}]})
+            return httpx.Response(200, json={"resourceType": "Bundle", "entry": []})
+        return httpx.Response(200, json={"resourceType": "Bundle", "entry": [], "link": [{"relation": "next", "url": "/r4/Appointment?page=2"}]})
 
     with httpx.Client(transport=httpx.MockTransport(handle), base_url="https://fhir.test/r4/") as client:
         assert FhirAppointmentVerifier(client).snapshot(create_claim()) == set()
@@ -257,8 +261,8 @@ def test_root_relative_next_link_is_not_appended_to_the_base_path():
 def test_odd_next_links_never_crash_the_snapshot(link):
     def handle(request):
         if request.url.params.get("page") == "2":
-            return httpx.Response(200, json={"entry": []})
-        return httpx.Response(200, json={"entry": [], "link": [{"relation": "next", "url": link}]})
+            return httpx.Response(200, json={"resourceType": "Bundle", "entry": []})
+        return httpx.Response(200, json={"resourceType": "Bundle", "entry": [], "link": [{"relation": "next", "url": link}]})
 
     with httpx.Client(transport=httpx.MockTransport(handle), base_url="https://fhir.test") as client:
         result = FhirAppointmentVerifier(client).snapshot(create_claim())
@@ -270,12 +274,19 @@ MALFORMED_BUNDLES = {
     "entry is a string": {"resourceType": "Bundle", "entry": "x"},
     "entry item is a string": {"resourceType": "Bundle", "entry": ["x"]},
     "resource is a string": {"resourceType": "Bundle", "entry": [{"resource": "x"}]},
-    "id is an object": {"resourceType": "Bundle", "entry": [{"resource": {"id": {"x": 1}}}]},
-    "participant is a string": {"resourceType": "Bundle", "entry": [{"resource": {"id": "a1", "participant": "x"}}]},
-    "actor reference is a number": {"resourceType": "Bundle", "entry": [{"resource": {"id": "a1", "participant": [{"actor": {"reference": 7}}]}}]},
+    "id is an object": {"resourceType": "Bundle", "entry": [{"resource": {"resourceType": "Appointment", "id": {"x": 1}}}]},
+    "participant is a string": {"resourceType": "Bundle", "entry": [{"resource": {"resourceType": "Appointment", "id": "a1", "participant": "x"}}]},
+    "actor reference is a number": {"resourceType": "Bundle", "entry": [{"resource": {"resourceType": "Appointment", "id": "a1", "participant": [{"actor": {"reference": 7}}]}}]},
     "link is a string": {"resourceType": "Bundle", "entry": [], "link": "next"},
     "link item is a string": {"resourceType": "Bundle", "entry": [], "link": ["next"]},
     "next url is a number": {"resourceType": "Bundle", "entry": [], "link": [{"relation": "next", "url": 5}]},
+    "OperationOutcome with 200": {"resourceType": "OperationOutcome", "issue": [{"severity": "error"}]},
+    "bundle without resourceType": {"entry": []},
+    "matched entry is not an Appointment": {"resourceType": "Bundle", "entry": [{"resource": {"resourceType": "Patient", "id": "p1"}}]},
+    "appointment without an id": {"resourceType": "Bundle", "entry": [{"resource": {"resourceType": "Appointment"}}]},
+    "actor is a list": {"resourceType": "Bundle", "entry": [{"resource": {"resourceType": "Appointment", "id": "a1", "participant": [{"actor": []}]}}]},
+    "actor is an empty string": {"resourceType": "Bundle", "entry": [{"resource": {"resourceType": "Appointment", "id": "a1", "participant": [{"actor": ""}]}}]},
+    "entry search is a string": {"resourceType": "Bundle", "entry": [{"search": "match", "resource": {"resourceType": "Appointment", "id": "a1"}}]},
 }
 
 
@@ -314,12 +325,34 @@ def test_next_link_without_a_usable_url_is_an_incomplete_read_not_verified(next_
         assert verifier.check(create_claim(), before).status is Status.UNVERIFIED
 
 
-def test_timestamp_without_a_utc_form_is_a_mismatch_not_a_crash():
-    assert normalize_instant("0001-01-01T00:00:00+01:00") == "0001-01-01T00:00:00+01:00"
+def test_outcome_and_include_entries_are_not_counted_as_appointments():
+    # A server warning added only to the check-time search must not become a false extra_effect.
+    warning = {"search": {"mode": "outcome"}, "resource": {"resourceType": "OperationOutcome", "issue": []}}
+    included = {"search": {"mode": "include"}, "resource": {"resourceType": "Practitioner", "id": "d1"}}
+    booked = {**_bundle_appointment("a1"), "search": {"mode": "match"}}
     pages = [{"resourceType": "Bundle", "entry": []},
-             {"resourceType": "Bundle", "entry": [_bundle_appointment("a1", "0001-01-01T00:00:00+01:00")]}]
+             {"resourceType": "Bundle", "entry": [warning, booked, included]}]
     transport = httpx.MockTransport(lambda request: httpx.Response(200, json=pages.pop(0) if len(pages) > 1 else pages[0]))
     with httpx.Client(transport=transport, base_url="https://fhir.test") as client:
         verifier = FhirAppointmentVerifier(client)
         verdict = verifier.check(create_claim(), verifier.snapshot(create_claim()))
-    assert verdict.status is Status.FAILED and [f.field for f in verdict.findings] == ["start"]
+    assert verdict.status is Status.VERIFIED and [item["id"] for item in verdict.observed["created"]] == ["a1"]
+
+
+@pytest.mark.parametrize("claimed, status", [
+    ("0001-01-01T00:00:00+01:00", Status.VERIFIED),  # identical text matches
+    ("0001-01-01T01:00:00+02:00", Status.FAILED),    # same instant written another way does not
+    (START, Status.FAILED),                          # a different instant does not
+])
+def test_timestamp_without_a_utc_form_is_compared_as_written_not_a_crash(claimed, status):
+    stored = "0001-01-01T00:00:00+01:00"  # year 1 at +01:00 has no UTC form
+    assert normalize_instant(stored) == stored
+    pages = [{"resourceType": "Bundle", "entry": []},
+             {"resourceType": "Bundle", "entry": [_bundle_appointment("a1", stored)]}]
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, json=pages.pop(0) if len(pages) > 1 else pages[0]))
+    with httpx.Client(transport=transport, base_url="https://fhir.test") as client:
+        verifier = FhirAppointmentVerifier(client)
+        claim = create_claim(start=claimed)
+        verdict = verifier.check(claim, verifier.snapshot(claim))
+    assert verdict.status is status
+    assert [f.field for f in verdict.findings] == ([] if status is Status.VERIFIED else ["start"])

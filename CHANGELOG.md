@@ -2,7 +2,7 @@
 
 All notable changes to `agent-readback`. Dates are UTC.
 
-## Unreleased
+## 0.3.1 — 2026-11-22
 
 ### Fixed
 
@@ -11,13 +11,28 @@ All notable changes to `agent-readback`. Dates are UTC.
   read as if it were complete, so a duplicate booking or a double refund on an
   unread page could pass. Both are now `unverified`.
 - A timestamp with no UTC form (for example year 1 at `+01:00`) raised
-  `OverflowError`; it is now left as is and shows as a mismatch.
+  `OverflowError`; it is now compared as written, so it matches only an identical
+  string; the same instant written another way is a `wrong_value`.
 - A malformed FHIR or Stripe response (for example a list where an object is
   expected, a string entry, or a non-string id or reference) made the verifier
   raise `AttributeError` or `TypeError` out of `watch()`, breaking the agent's
   call. Responses are now shape-checked where they are parsed and anything
   malformed is `unverified`. A Stripe refund page that repeats now stops after
   the second request instead of after `MAX_PAGES`.
+- A broken read could still be a false `failed`:
+  - A Stripe 200 response with no `data` list or no `has_more` (an error body,
+    a proxy page, `{}`) was read as "no refunds", so a real refund was
+    `failed`. Both fields are now required; otherwise the result is `unverified`.
+  - A FHIR 200 response that is not a Bundle (for example an
+    OperationOutcome) was read as an empty search. A search entry that is not
+    an Appointment, or a read by id that returns another resource type, was
+    counted as an appointment. These are now `unverified`. Entries with
+    `search.mode` `include` or `outcome` are skipped instead of counted.
+  - An Appointment with no id was keyed by its position in the read, so an
+    unchanged one could look new (a false `extra_effect`) or hide a new
+    duplicate. A missing or empty id is now `unverified`.
+  - A participant `actor` that was `[]`, `""` or another falsy non-object was
+    treated as absent, giving a `wrong_value` `failed`. It is now `unverified`.
 
 ### Documentation
 

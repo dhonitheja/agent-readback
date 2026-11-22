@@ -405,7 +405,20 @@ MALFORMED_REFUND_PAGES = {
     "refund id is a number": {"data": [{"id": 7}], "has_more": False},
     "has_more is a string": {"data": [], "has_more": "false"},
     "data is an object": {"data": {"id": "re_1"}, "has_more": False},
+    "error body with 200": {"error": {"type": "api_error", "message": "x"}},
+    "empty object": {},
+    "has_more missing": {"data": []},
 }
+
+
+def test_error_shaped_stripe_page_after_a_real_refund_is_unverified_not_failed():
+    # The refund exists, but the check-time read is broken: that must never read as "no refund".
+    pages = [{"data": [], "has_more": False}, {"error": {"type": "api_error"}}]
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, json=pages.pop(0) if len(pages) > 1 else pages[0]))
+    with httpx.Client(transport=transport, base_url="https://stripe.test") as client:
+        verifier = StripeRefundVerifier(client)
+        verdict = verifier.check(REFUND, verifier.snapshot(REFUND))
+    assert verdict.status is Status.UNVERIFIED and kinds(verdict) == [FindingKind.UNREACHABLE]
 
 
 @pytest.mark.parametrize("body", MALFORMED_REFUND_PAGES.values(), ids=MALFORMED_REFUND_PAGES.keys())
