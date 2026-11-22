@@ -56,8 +56,11 @@ def _array(value: Any, what: str) -> list[Any]:
 def flatten_appointment(resource: dict[str, Any]) -> dict[str, Any]:
     """Reduce a FHIR Appointment to the flat fields a claim can assert on."""
     resource = _object(resource, "Appointment")
-    if not isinstance(resource.get("id"), (str, type(None))):
-        raise ValueError("malformed FHIR response: Appointment.id is not a string")
+    if resource.get("resourceType") != "Appointment":  # e.g. an OperationOutcome sent with HTTP 200
+        raise ValueError("malformed FHIR response: resource is not an Appointment")
+    if not isinstance(resource.get("id"), str) or not resource["id"]:
+        # A stored resource always has an id; keying by position would let an old entry look new.
+        raise ValueError("malformed FHIR response: Appointment.id is missing or not a string")
     flat: dict[str, Any] = {
         "id": resource.get("id"),
         "status": resource.get("status"),
@@ -67,7 +70,8 @@ def flatten_appointment(resource: dict[str, Any]) -> dict[str, Any]:
         "practitioner": None,
     }
     for participant in _array(resource.get("participant", []), "Appointment.participant"):
-        actor = _object(_object(participant, "participant").get("actor") or {}, "participant.actor")
+        actor = _object(participant, "participant").get("actor")
+        actor = _object({} if actor is None else actor, "participant.actor")  # [] or "" is malformed, not absent
         reference = actor.get("reference", "")
         if not isinstance(reference, str):
             raise ValueError("malformed FHIR response: actor.reference is not a string")
@@ -97,9 +101,14 @@ class FhirAppointmentVerifier:
             response = self.client.get(url, params=params, headers={"Cache-Control": "no-cache"})
             response.raise_for_status()
             bundle = _object(response.json(), "search Bundle")
+            if bundle.get("resourceType") != "Bundle":  # e.g. an OperationOutcome sent with HTTP 200
+                raise ValueError("malformed FHIR response: search result is not a Bundle")
             for entry in _array(bundle.get("entry", []), "Bundle.entry"):
-                flat = flatten_appointment(_object(entry, "Bundle.entry item")["resource"])
-                found[flat["id"] or f"<no-id>#{len(found)}"] = flat  # keep id-less entries distinct
+                entry = _object(entry, "Bundle.entry item")
+                if _object(entry.get("search", {}), "Bundle.entry.search").get("mode") in ("include", "outcome"):
+                    continue  # _include'd resources and server warnings are not search matches
+                flat = flatten_appointment(entry["resource"])
+                found[flat["id"]] = flat
             links = [_object(link, "Bundle.link item") for link in _array(bundle.get("link", []), "Bundle.link")]
             nexts = [link for link in links if link.get("relation") == "next"]
             url = nexts[0].get("url") if nexts else None
