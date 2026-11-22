@@ -165,6 +165,33 @@ def test_dashboard_page_is_redacted_and_escapes_hostile_context(tmp_path):
     assert "<script>" not in html and "&lt;script&gt;" in html
 
 
+def test_dashboard_tables_are_keyboard_reachable_and_labelled():
+    # Each scroll box must be focusable and named, every header a column header, and only the wide table
+    # may force sideways scrolling (a min-width on all tables hid the Failed and Count columns on phones).
+    from html.parser import HTMLParser
+    from agent_readback.dashboard import STYLE, render_html
+
+    class Collect(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.tags = []
+
+        def handle_starttag(self, tag, attrs):
+            self.tags.append((tag, dict(attrs)))
+
+    parser = Collect()
+    parser.feed(render_html([], True))
+    ids = {a["id"] for t, a in parser.tags if "id" in a}
+    wraps = [a for t, a in parser.tags if t == "div" and a.get("class") == "wrap"]
+    assert len(wraps) == 3
+    for wrap in wraps:
+        assert wrap.get("tabindex") == "0" and wrap.get("role") == "region" and wrap.get("aria-labelledby") in ids
+    headers = [a for t, a in parser.tags if t == "th"]
+    assert headers and all(a.get("scope") == "col" for a in headers)
+    assert [a.get("class") for t, a in parser.tags if t == "table"] == [None, None, "wide"]
+    assert "min-width" not in STYLE.split("table{", 1)[1].split("}", 1)[0]  # no width floor on every table
+
+
 def test_dashboard_of_a_tampered_log_says_broken_and_exits_1(tmp_path):
     path, out = tmp_path / "log.jsonl", tmp_path / "page.html"
     log = EvidenceLog(path)

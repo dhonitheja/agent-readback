@@ -344,8 +344,8 @@ external security or compliance review has been done.
 
 ## What is tested and what is not
 
-Version 0.3.1. The suite has 199 offline tests; with the optional test dependencies
-installed, 198 pass on Windows and the symlink test is skipped there without symlink privileges; elsewhere it runs too. A separate public HAPI FHIR R4 sandbox run verified 10 scripted
+Version 0.3.1. The suite has 200 offline tests; with the optional test dependencies
+installed, 199 pass on Windows and the symlink test is skipped there without symlink privileges; elsewhere it runs too. A separate public HAPI FHIR R4 sandbox run verified 10 scripted
 operations (6 bookings, 1 reschedule, 3 cancellations); this is a
 compatibility smoke test, not production validation. A Stripe test-mode run
 produced the expected verdict for all four refund scenarios, using a separate

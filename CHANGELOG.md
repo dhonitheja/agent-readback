@@ -2,6 +2,20 @@
 
 All notable changes to `agent-readback`. Dates are UTC.
 
+## Unreleased
+
+### Fixed
+
+- `readback dashboard` on a phone: every table had a 520px minimum width, so
+  at 375px the Failed and Unverified counts and the findings Count column were
+  scrolled out of view. Only the five-column "Latest problems" table keeps a
+  minimum width now; the others fit, action names wrap after each dot, and
+  headers and verdict badges no longer break mid-word.
+- Dashboard accessibility: each table's scroll area is focusable
+  (`tabindex="0"`), is a labelled region named by its heading, and has a
+  visible focus outline, so keyboard users can scroll it in any browser.
+  Column headers carry `scope="col"` and each table is labelled by its heading.
+
 ## 0.3.1 — 2026-11-22
 
 ### Fixed
