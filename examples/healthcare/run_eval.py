@@ -78,7 +78,7 @@ def safe_caller(tools: dict[str, Any]):
 
 
 def run(args: argparse.Namespace) -> dict[str, Any]:
-    rng = random.Random(args.seed)
+    rng = random.Random(args.seed)  # seeded for repeatable evals, not security  # nosec B311
     server: MockFhirServer | None = None
     if args.fhir_url:
         new_client = lambda: httpx.Client(base_url=args.fhir_url, timeout=30.0)  # noqa: E731

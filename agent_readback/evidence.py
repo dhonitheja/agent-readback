@@ -106,6 +106,42 @@ def redact(body: dict[str, Any], keep: frozenset[str], key: bytes | None = None)
 
 
 Anchor = Callable[[int, str], None]  # called with (record count, head hash) after each append
+_SID = re.compile(r"^S-1-\d+(-\d+)+$")
+
+
+def _owner_only(path: Path) -> None:
+    """Windows ignores mode 0o600; drop inherited access so only the current user can open the log.
+
+    Never raises: a failure warns, like a failing anchor, so the agent keeps running.
+    """
+    if os.name != "nt":
+        return  # 0o600 at creation already does this
+    import ctypes
+    import subprocess  # fixed system tools, argument lists, no shell  # nosec B404
+
+    # Nothing here comes from the environment: SystemRoot, PATH, USERNAME and
+    # USERDOMAIN can all name the wrong thing (e.g. under `runas /env`), and a
+    # grant to the wrong account locks this process out of its own log.
+    buffer = ctypes.create_unicode_buffer(260)
+    system32 = Path(buffer.value) if ctypes.windll.kernel32.GetSystemDirectoryW(buffer, 260) else None
+    failed = "" if system32 else "could not locate the System32 directory"
+    try:
+        if not failed:  # whoami reads the SID from this process's own access token
+            run = lambda *args: subprocess.run(  # noqa: E731  # absolute executable, list args  # nosec B603
+                [str(system32 / args[0]), *args[1:]], capture_output=True, text=True, timeout=30
+            )
+            who = run("whoami.exe", "/user", "/fo", "csv", "/nh")
+            sid = who.stdout.strip().rsplit(",", 1)[-1].strip('"') if who.returncode == 0 else ""
+            if not _SID.match(sid):
+                failed = f"could not read the current user's SID: {(who.stderr or who.stdout).strip()!r}"
+            else:
+                result = run("icacls.exe", str(path), "/inheritance:r", "/grant:r", f"*{sid}:F")
+                if result.returncode != 0:  # icacls can fail without printing anything
+                    failed = (result.stderr or result.stdout).strip() or f"icacls exited with {result.returncode}"
+    except (OSError, subprocess.SubprocessError) as error:
+        failed = str(error)
+    if failed:
+        warnings.warn(f"could not restrict {path} to the current user: {failed}", RuntimeWarning, stacklevel=5)
 
 
 class FileAnchor:
@@ -176,6 +212,16 @@ class EvidenceLog:
             # instead of "edited". A forger can delete it, so the CLI also flags every
             # keyless verification as not forgery-proof.
             record["mac"] = MAC_ALG
+        if not self.path.exists():
+            # Create it empty and restrict it before the first record is written.
+            # ponytail: a process that opens the file in the moment between create and
+            # restrict keeps that handle; a log folder only you can access closes that too.
+            try:
+                os.close(os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
+            except FileExistsError:
+                pass  # another writer created it first and restricts it
+            else:
+                _owner_only(self.path)
         fd = os.open(self.path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
         with os.fdopen(fd, "a", encoding="utf-8", newline="\n") as handle:  # same bytes on every OS
             handle.write(json.dumps(record) + "\n")

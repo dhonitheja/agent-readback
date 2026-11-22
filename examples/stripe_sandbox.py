@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 from pathlib import Path
 from uuid import uuid4
 
@@ -30,8 +31,8 @@ def _load_env_file() -> None:
                         v = v.strip().strip("'\"")
                         if k and k not in os.environ:
                             os.environ[k] = v
-            except Exception:
-                pass
+            except (OSError, UnicodeDecodeError) as error:  # unreadable .env: say so, keep the real env
+                print(f"Warning: could not read {candidate}: {error}", file=sys.stderr)
 
 
 def test_keys() -> tuple[str, str]:

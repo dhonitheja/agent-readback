@@ -33,10 +33,10 @@ examples: run_eval harness, LangGraph agent, mock FHIR server, Stripe sandbox ru
 | 5 | SQL verifier on Postgres with a `SELECT`-only role | verifiers | Only SQLite is tested | Postgres instance |
 | 6 | ~~Re-check pending Stripe refunds later instead of leaving them `unverified`~~ (done: `recheck()`, `FindingKind.PENDING`) | core, verifiers | Known limit | — |
 | 7 | ~~Anchor the evidence-log head hash outside the log~~ (done: `anchor=`, `FileAnchor`, `verify-log --anchor/--head`) | evidence | Dropping the newest records is undetectable from the file alone | — |
-| 8 | Rate-limit the verifier's own reads | verifiers | Known limit; matters under production load | — |
-| 9 | Real-model eval on the LangGraph agent, 50+ runs per model | examples | The 3-run smoke test cannot compare models | API keys |
-| 10 | MCP over HTTP, not only in-memory and stdio | adapters | Listed as untested | — |
-| 11 | Cross-check `run_eval` and the LangGraph agent: same seed and model, aligned outcome labels | examples | The two harnesses label outcomes slightly differently | 9 |
+| 8 | ~~Rate-limit the verifier's own reads~~ (done 2026-11-21: `RateLimit` + `limit_reads`, opt-in; no 429 retry) | verifiers | Known limit; matters under production load | — |
+| 9 | ~~Real-model eval on the LangGraph agent, 50+ runs per model~~ (done 2026-11-20: Sonnet, Haiku, gpt-6-luna, 50 runs each) | examples | The 3-run smoke test cannot compare models | API keys |
+| 10 | ~~MCP over HTTP, not only in-memory and stdio~~ (done 2026-11-21: Streamable HTTP on 127.0.0.1, MCP 1.30 and 2.3; remote hosts with TLS or auth not tested) | adapters | Listed as untested | — |
+| 11 | ~~Cross-check `run_eval` and the LangGraph agent on the same seed and model~~ (done: labels aligned in 0.3.0; seed 7 task verdicts identical run for run for all three models) | examples | The two harnesses label outcomes slightly differently | 9 |
 | 12 | External security and compliance review (HIPAA) | all | None has been done; the target domain is healthcare | 1–8 |
 
 Steps 1–3 are short and unblock the rest. Steps 4, 5 and 9 need credentials or
@@ -48,5 +48,5 @@ infrastructure from the maintainer. Step 12 needs outside reviewers.
   UNKEYED flagging and `--require-key`, dashboard overwrite guard, malformed
   record handling, LF log endings, LangGraph example agent with Anthropic and
   OpenAI models, `tzdata` on Windows.
-- Verified locally: 114 tests pass on MCP 1.30 and on MCP 2.3, both with
+- Verified locally (2026-11-21, 0.3.0): 154 tests pass on MCP 1.30 and on MCP 2.3, both with
   LangGraph 1.2 (1 symlink test skips on Windows without symlink privileges).
