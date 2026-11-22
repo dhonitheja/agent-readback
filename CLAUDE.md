@@ -42,5 +42,5 @@ python -m pip install -e ".[security]" && python -m bandit -r agent_readback exa
 - All HTTP goes through an injected `httpx.Client`; tests swap in `httpx.MockTransport`. Keep new verifiers and providers injectable the same way.
 - New verifier: implement `snapshot`/`check` per `core.Verifier`, name actions `<system>.<resource>.<verb>`, export from `verifiers/__init__.py`, update the README verifier table.
 - The verifier must use credentials the agent doesn't hold; a shared write path makes the check meaningless.
-- The README's "What is tested and what is not" and "Security model" tables are kept honest. Update them (and the test count, currently 199, of which 1 skips on Windows without symlink privileges) when coverage or guarantees change.
+- The README's "What is tested and what is not" and "Security model" tables are kept honest. Update them (and the test count, currently 200, of which 1 skips on Windows without symlink privileges) when coverage or guarantees change.
 - Security changes need a test that demonstrates the attack failing (see `test_keyed_log_detects_a_chain_forged_without_the_key`), not just the happy path.

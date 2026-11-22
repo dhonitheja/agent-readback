@@ -15,15 +15,33 @@ main{max-width:920px;margin:0 auto;padding:28px 18px 60px}h1{font-size:22px;marg
 .sub{color:var(--mut);margin:0 0 22px}.tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}
 .tile{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px 16px}.tile b{display:block;font-size:28px;line-height:1.1;font-variant-numeric:tabular-nums}
 .tile span{color:var(--mut);font-size:13px}.ok b{color:var(--ok)}.bad b{color:var(--bad)}.warn b{color:var(--warn)}
-.wrap{overflow-x:auto;border:1px solid var(--line);border-radius:10px;background:var(--card)}table{border-collapse:collapse;width:100%;min-width:520px}
-th,td{text-align:left;padding:9px 14px;border-bottom:1px solid var(--line);font-variant-numeric:tabular-nums;vertical-align:top}th{font-size:12px;color:var(--mut);font-weight:600}
-tr:last-child td{border-bottom:0}code{font:13px ui-monospace,Menlo,Consolas,monospace}.pill{display:inline-block;border-radius:99px;padding:1px 9px;font-size:12px;border:1px solid currentColor}
+.wrap{overflow-x:auto;border:1px solid var(--line);border-radius:10px;background:var(--card)}.wrap:focus-visible{outline:2px solid var(--fg);outline-offset:2px}
+table{border-collapse:collapse;width:100%}table.wide{min-width:560px}
+th,td{text-align:left;padding:9px 14px;border-bottom:1px solid var(--line);font-variant-numeric:tabular-nums;vertical-align:top;overflow-wrap:anywhere}th{font-size:12px;color:var(--mut);font-weight:600;white-space:nowrap;overflow-wrap:normal}
+tr:last-child td{border-bottom:0}code{font:13px ui-monospace,Menlo,Consolas,monospace}
+@media (max-width:480px){th,td{padding:8px 8px}}.pill{display:inline-block;border-radius:99px;padding:1px 9px;font-size:12px;border:1px solid currentColor;white-space:nowrap;overflow-wrap:normal}
 .chain{margin-top:22px;font-size:13px;color:var(--mut)}
 """
 
 
 def _tile(css: str, value: str, label: str) -> str:
     return f'<div class="tile {css}"><b>{escape(value)}</b><span>{escape(label)}</span></div>'
+
+
+def _breakable(action: str) -> str:
+    """Escape an action name and let it wrap after each dot, not mid-word, on narrow screens."""
+    return escape(action).replace(".", ".<wbr>")
+
+
+def _table(key: str, heading: str, columns: tuple[str, ...], rows: str, wide: bool = False) -> str:
+    # The scroll box is focusable and named by its heading, so keyboard users can scroll it in any browser.
+    # Only the wide table keeps a minimum width; the narrow ones fit a phone screen without scrolling.
+    head = "".join(f'<th scope="col">{escape(c)}</th>' for c in columns)
+    return (
+        f'<h2 id="h-{key}">{escape(heading)}</h2>'
+        f'<div class="wrap" role="region" aria-labelledby="h-{key}" tabindex="0">'
+        f'<table{" class=wide" if wide else ""} aria-labelledby="h-{key}"><tr>{head}</tr>{rows}</table></div>'
+    )
 
 
 def render_html(
@@ -39,7 +57,7 @@ def render_html(
         ]
     )
     action_rows = "".join(
-        f"<tr><td><code>{escape(action)}</code></td><td>{counts.get('verified', 0)}</td>"
+        f"<tr><td><code>{_breakable(action)}</code></td><td>{counts.get('verified', 0)}</td>"
         f"<td>{counts.get('failed', 0)}</td><td>{counts.get('unverified', 0)}</td></tr>"
         for action, counts in summary["by_action"].items()
     )
@@ -51,7 +69,7 @@ def render_html(
     problem_rows = "".join(
         "<tr><td>{when}</td><td><code>{action}</code></td><td><span class='pill' style='color:var(--{tone})'>{status}</span></td><td>{why}</td><td>{ctx}</td></tr>".format(
             when=escape(body["checked_at"][:19].replace("T", " ")),
-            action=escape(body["claim"]["action"]),
+            action=_breakable(body["claim"]["action"]),
             tone="bad" if body["status"] == "failed" else "warn",
             status=escape(body["status"]),
             why=escape(", ".join(f["kind"].replace("_", " ") + (f" ({f['field']})" if f.get("field") else "") for f in body["findings"])),
@@ -67,9 +85,9 @@ def render_html(
 <title>{escape(title)}</title><style>{STYLE}</style></head><body><main>
 <h1>{escape(title)}</h1><p class="sub">What the agent claimed, checked against the system of record.</p>
 <div class="tiles">{tiles}</div>
-<h2>By action</h2><div class="wrap"><table><tr><th>Action</th><th>Verified</th><th>Failed</th><th>Unverified</th></tr>{action_rows}</table></div>
-<h2>Why claims failed</h2><div class="wrap"><table><tr><th>Finding</th><th>Count</th></tr>{finding_rows}</table></div>
-<h2>Latest problems</h2><div class="wrap"><table><tr><th>Checked (UTC)</th><th>Action</th><th>Verdict</th><th>Findings</th><th>Context</th></tr>{problem_rows}</table></div>
+{_table("actions", "By action", ("Action", "Verified", "Failed", "Unverified"), action_rows)}
+{_table("findings", "Why claims failed", ("Finding", "Count"), finding_rows)}
+{_table("problems", "Latest problems", ("Checked (UTC)", "Action", "Verdict", "Findings", "Context"), problem_rows, wide=True)}
 <p class="chain">Evidence chain: {escape(chain)}. {len(records)} records.</p>
 </main></body></html>
 """
