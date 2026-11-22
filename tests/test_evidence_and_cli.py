@@ -432,7 +432,7 @@ def test_icacls_failing_without_output_still_warns(tmp_path, monkeypatch):
 
     def fake_run(args, **kwargs):
         if args[0].lower().endswith("whoami.exe"):
-            return subprocess.CompletedProcess(args, 0, '"host\me","S-1-5-21-1-2-3-1001"\n', "")
+            return subprocess.CompletedProcess(args, 0, '"host\\me","S-1-5-21-1-2-3-1001"\n', "")
         return subprocess.CompletedProcess(args, 1, "", "")  # icacls: failed, printed nothing
 
     monkeypatch.setattr(subprocess, "run", fake_run)
