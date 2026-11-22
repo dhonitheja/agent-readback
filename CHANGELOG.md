@@ -2,7 +2,21 @@
 
 All notable changes to `agent-readback`. Dates are UTC.
 
-## 0.3.0 — 2026-11-21
+## Unreleased
+
+### Documentation
+
+- README reworked as a front page: quick start near the top, a results table,
+  shorter security cells with notes.
+- `FileAnchor` guidance corrected: the log writer itself rewrites the anchor
+  file, so the file is only as safe as the log. Check against a copy the
+  writer cannot rewrite that holds the current head (an older copy such as a
+  backup lets records added since be dropped undetected), or pass an anchor
+  callable that appends to an independent append-only store; monitor
+  `anchor_error` if you rely on the anchor. (The old text said to put the file
+  where the writer cannot change it, which would make anchoring fail.)
+
+## 0.3.0 — 2026-11-22
 
 ### Breaking changes
 
