@@ -15,6 +15,10 @@ All notable changes to `agent-readback`. Dates are UTC.
   (`tabindex="0"`), is a labelled region named by its heading, and has a
   visible focus outline, so keyboard users can scroll it in any browser.
   Column headers carry `scope="col"` and each table is labelled by its heading.
+- Stripe: a refund whose id is empty or only whitespace is now a malformed
+  read (`unverified`). It used to pass the id check, become a snapshot key, and
+  could return `verified` for an otherwise matching claim. FHIR already
+  rejected such Appointment ids; both now have end-to-end regression tests.
 
 ## 0.3.1 — 2026-11-22
 
