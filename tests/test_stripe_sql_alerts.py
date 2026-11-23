@@ -403,6 +403,8 @@ MALFORMED_REFUND_PAGES = {
     "page is a list": [],
     "refund is a string": {"data": ["re_1"], "has_more": False},
     "refund id is a number": {"data": [{"id": 7}], "has_more": False},
+    "refund id is empty": {"data": [{"id": ""}], "has_more": False},
+    "refund id is whitespace": {"data": [{"id": "   "}], "has_more": False},
     "has_more is a string": {"data": [], "has_more": "false"},
     "data is an object": {"data": {"id": "re_1"}, "has_more": False},
     "error body with 200": {"error": {"type": "api_error", "message": "x"}},
@@ -453,3 +455,14 @@ def test_has_more_with_an_empty_page_is_an_incomplete_read_not_verified():
         before = verifier.snapshot(REFUND)
         assert before == set()
         assert verifier.check(REFUND, before).status is Status.UNVERIFIED
+
+
+def test_blank_refund_id_never_verifies_an_otherwise_matching_refund():
+    # Stripe ids never contain whitespace; a blank one is a malformed read, not a new refund to verify against.
+    blank = {"id": "   ", "amount": 2500, "currency": "usd", "status": "succeeded", "payment_intent": "pi_1"}
+    pages = [{"data": [], "has_more": False}, {"data": [blank], "has_more": False}]
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, json=pages.pop(0) if len(pages) > 1 else pages[0]))
+    with httpx.Client(transport=transport, base_url="https://stripe.test") as client:
+        verifier = StripeRefundVerifier(client)
+        verdict = verifier.check(REFUND, verifier.snapshot(REFUND))
+    assert verdict.status is Status.UNVERIFIED and kinds(verdict) == [FindingKind.UNREACHABLE]

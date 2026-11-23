@@ -284,7 +284,10 @@ MALFORMED_BUNDLES = {
     "bundle without resourceType": {"entry": []},
     "matched entry is not an Appointment": {"resourceType": "Bundle", "entry": [{"resource": {"resourceType": "Patient", "id": "p1"}}]},
     "appointment without an id": {"resourceType": "Bundle", "entry": [{"resource": {"resourceType": "Appointment"}}]},
+    "appointment id is empty": {"resourceType": "Bundle", "entry": [{"resource": {"resourceType": "Appointment", "id": ""}}]},
+    "appointment id is whitespace": {"resourceType": "Bundle", "entry": [{"resource": {"resourceType": "Appointment", "id": "   "}}]},
     "actor is a list": {"resourceType": "Bundle", "entry": [{"resource": {"resourceType": "Appointment", "id": "a1", "participant": [{"actor": []}]}}]},
+    "actor is an empty dict list": {"resourceType": "Bundle", "entry": [{"resource": {"resourceType": "Appointment", "id": "a1", "participant": [{"actor": [{}]}]}}]},
     "actor is an empty string": {"resourceType": "Bundle", "entry": [{"resource": {"resourceType": "Appointment", "id": "a1", "participant": [{"actor": ""}]}}]},
     "entry search is a string": {"resourceType": "Bundle", "entry": [{"search": "match", "resource": {"resourceType": "Appointment", "id": "a1"}}]},
 }

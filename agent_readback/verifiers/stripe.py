@@ -78,7 +78,8 @@ class StripeRefundVerifier:
             if not isinstance(items, list) or not isinstance(has_more, bool):
                 raise ValueError("malformed Stripe response: data is not a list or has_more is not a boolean")
             for item in items:
-                if not isinstance(item, dict) or not isinstance(item.get("id"), str) or not item["id"]:
+                if not isinstance(item, dict) or not isinstance(item.get("id"), str) or not item["id"].strip():
+                    # A blank id would become a snapshot key and let a malformed refund verify a claim.
                     raise ValueError("malformed Stripe response: refund without a string id")
                 found[item["id"]] = {name: item.get(name) for name in FIELDS}
             if not has_more:
