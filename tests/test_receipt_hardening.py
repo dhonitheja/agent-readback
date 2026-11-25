@@ -335,3 +335,13 @@ def test_a_missing_prior_log_stops_reconciliation(tmp_path, stripe_cli, capsys):
                  "--prior", str(tmp_path / "octber.jsonl")]) == 3
     assert "not found" in capsys.readouterr().err
     assert stripe_cli.methods == [] and not receipts.exists()
+
+
+@pytest.mark.parametrize("status", [None, "paid_out_someday"])
+def test_a_refund_with_no_known_status_is_unverifiable_not_billable(tmp_path, status):
+    stripe = Stripe()
+    stripe.refund("pi_A1", 2500)
+    stripe.refunds[-1]["status"] = status
+    path = csv_file(tmp_path, ["fin-1,stripe.refund.create,pi_A1,2500,usd"])
+    receipts = run_stripe(stripe, path)
+    assert [r.verdict for r in receipts] == ["unverifiable"] and summarise(receipts)["verified"] == 0

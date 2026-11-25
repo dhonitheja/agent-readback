@@ -229,6 +229,9 @@ class _Reads:
 _METADATA_KEY = re.compile(r"[A-Za-z0-9_-]{1,40}")  # Stripe metadata keys are at most 40 characters
 
 
+_REFUND_STATUSES = frozenset({"succeeded", "pending", "requires_action", "failed", "canceled"})
+
+
 class StripeRefunds:
     """Stripe refunds for each claimed payment intent.
 
@@ -264,6 +267,9 @@ class StripeRefunds:
                 continue
             effect = f"stripe:refund:{refund_id}"
             status = item.get("status")
+            if status not in _REFUND_STATUSES:
+                # Settlement cannot be told from a missing or unknown status.
+                return _Found(error="refund without a known status")
             if "status" in claim.expected and status != claim.expected["status"]:
                 found.contradicted.append(Finding(FindingKind.WRONG_VALUE, "status differs", "status"))
             elif status in ("failed", "canceled"):

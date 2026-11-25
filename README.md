@@ -435,8 +435,8 @@ external security or compliance review has been done.
 
 ## What is tested and what is not
 
-Version 0.3.1 plus unreleased receipts. The suite has 345 offline tests; on Linux
-with the optional test dependencies, 340 pass and 5 Windows-only access tests skip. On Windows the symlink test is skipped without symlink privileges. A separate public HAPI FHIR R4 sandbox run verified 10 scripted
+Version 0.3.1 plus unreleased receipts. The suite has 347 offline tests; on Linux
+with the optional test dependencies, 342 pass and 5 Windows-only access tests skip. On Windows the symlink test is skipped without symlink privileges. A separate public HAPI FHIR R4 sandbox run verified 10 scripted
 operations (6 bookings, 1 reschedule, 3 cancellations); this is a
 compatibility smoke test, not production validation. A Stripe test-mode run
 produced the expected verdict for all four refund scenarios, using a separate

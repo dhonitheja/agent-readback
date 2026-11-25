@@ -16,7 +16,8 @@ All notable changes to `agent-readback`. Dates are UTC.
   verified. One effect backs one outcome; `--prior` receipt logs catch
   re-billing across periods (a missing `--prior` file stops the run);
   `--since` ignores older refunds. A refund that has not settled is never
-  billable, even when the export claims its status. GET only, rate-limited,
+  billable, even when the export claims its status, and one with no known
+  status is unverifiable. GET only, rate-limited,
   credentials from the environment only.
 - `readback verify-receipts`, with `--anchor` / `--head`.
 - `receipted()` and `OutcomeNotVerified`: a tool wrapper that writes a receipt
