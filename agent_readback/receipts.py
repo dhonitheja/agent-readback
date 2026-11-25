@@ -42,7 +42,7 @@ from typing import Any, Callable, Iterable
 from .alerts import ALERT_KEY_ENV, is_alert_key
 from .core import FindingKind, Status, Verdict
 from .evidence import KEY_ENV as LOG_KEY_ENV
-from .evidence import EvidenceLog, is_log_key, note_receipt_key
+from .evidence import KEY_REGISTRY_LOCK, EvidenceLog, is_log_key, note_receipt_key
 
 RECEIPT_KEY_ENV = "READBACK_RECEIPT_KEY"
 RECEIPT_VERSION = 1
@@ -134,11 +134,12 @@ def receipt_key(key: bytes | str | None = None) -> bytes:
     raw = key.encode() if isinstance(key, str) else bytes(key)
     if len(raw) < MIN_KEY_BYTES:
         raise ReceiptKeyError(f"the receipt key must be at least {MIN_KEY_BYTES} bytes")
-    if is_log_key(raw):
-        raise ReceiptKeyError(f"the receipt key must differ from {LOG_KEY_ENV}: receipts leave the machine, the log key must not")
-    if is_alert_key(raw):
-        raise ReceiptKeyError(f"the receipt key must differ from {ALERT_KEY_ENV}")
-    note_receipt_key(raw)  # so a WebhookAlert made later in this process refuses it
+    with KEY_REGISTRY_LOCK:  # check and register as one step, so a concurrent alert or log cannot slip in between
+        if is_log_key(raw):
+            raise ReceiptKeyError(f"the receipt key must differ from {LOG_KEY_ENV}: receipts leave the machine, the log key must not")
+        if is_alert_key(raw):
+            raise ReceiptKeyError(f"the receipt key must differ from {ALERT_KEY_ENV}")
+        note_receipt_key(raw)  # so a WebhookAlert or EvidenceLog made later in this process refuses it
     return raw
 
 

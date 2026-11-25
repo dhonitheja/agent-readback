@@ -467,6 +467,54 @@ def test_a_receipt_key_already_in_use_is_refused_as_an_evidence_log_key(tmp_path
     EvidenceLog(tmp_path / "e.jsonl", key="a-distinct-log-key-0123456789abcdef-test")  # a distinct key is fine
 
 
+@pytest.mark.parametrize("other", ["alert", "log"])
+def test_the_same_key_used_at_once_as_receipt_and_alert_or_log_key_is_refused_once(tmp_path, monkeypatch, other):
+    """The attack: two threads given one key both pass the check before either registers it."""
+    import threading
+
+    from agent_readback import EvidenceLog, WebhookAlert, receipts
+
+    checked = threading.Event()
+    other_done = threading.Event()
+    real_is_alert_key = receipts.is_alert_key
+
+    def is_alert_key_then_pause(raw):
+        result = real_is_alert_key(raw)
+        checked.set()  # receipt_key has checked the alert registry but not yet registered the key
+        other_done.wait(0.5)  # the other thread gets every chance to slip in here
+        return result
+
+    monkeypatch.setattr(receipts, "is_alert_key", is_alert_key_then_pause)
+    outcomes = {}
+
+    def make_receipt_key():
+        try:
+            receipts.receipt_key(KEY)
+            outcomes["receipt"] = "ok"
+        except (ReceiptKeyError, ValueError):
+            outcomes["receipt"] = "refused"
+
+    def make_other():
+        checked.wait(2)
+        try:
+            if other == "alert":
+                WebhookAlert("https://alerts.test/hook", key=KEY)
+            else:
+                EvidenceLog(tmp_path / "e.jsonl", key=KEY)
+            outcomes[other] = "ok"
+        except ValueError:
+            outcomes[other] = "refused"
+        finally:
+            other_done.set()
+
+    threads = [threading.Thread(target=make_receipt_key), threading.Thread(target=make_other)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(5)
+    assert sorted(outcomes.values()) == ["ok", "refused"], outcomes
+
+
 def test_a_receipt_failure_is_a_warning_where_exceptions_take_no_notes():
     from agent_readback.adapters import _issue_keeping
 

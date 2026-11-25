@@ -50,6 +50,11 @@ _HEX64 = re.compile(r"^[0-9a-f]{64}$")
 # keys used by other processes are not visible here.
 _LOG_KEY_FINGERPRINTS: set[str] = set()
 
+# Held while a log, receipt or alert key is checked against the other registries
+# and then registered, so two threads given the same key cannot both pass the
+# check before either registers it. Reentrant: a check may run under it.
+KEY_REGISTRY_LOCK = threading.RLock()
+
 
 def _fingerprint(key: bytes) -> str:
     return hashlib.sha256(b"readback-log-key:" + key).hexdigest()
@@ -221,10 +226,11 @@ class EvidenceLog:
         self.keep_all = keep_fields == "*"
         self.keep = frozenset() if self.keep_all else frozenset(keep_fields)
         self.key = self._resolve_key(key)
-        if self.key and self._is_evidence_log and is_receipt_key(self.key):
-            raise ValueError(f"the log key must differ from {_RECEIPT_KEY_ENV}: receipts leave the machine, the log key must not")
         if self.key and self._is_evidence_log:
-            _LOG_KEY_FINGERPRINTS.add(_fingerprint(self.key))
+            with KEY_REGISTRY_LOCK:
+                if is_receipt_key(self.key):
+                    raise ValueError(f"the log key must differ from {_RECEIPT_KEY_ENV}: receipts leave the machine, the log key must not")
+                _LOG_KEY_FINGERPRINTS.add(_fingerprint(self.key))
         self._lock = threading.Lock()  # parallel tool calls (e.g. LangGraph ToolNode) share one log
         self._last = GENESIS
         self._count = 0

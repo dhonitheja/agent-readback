@@ -10,7 +10,7 @@ import os
 import httpx
 
 from .core import Status, Verdict
-from .evidence import _RECEIPT_KEY_ENV, is_log_key, is_receipt_key
+from .evidence import _RECEIPT_KEY_ENV, KEY_REGISTRY_LOCK, is_log_key, is_receipt_key
 from .evidence import KEY_ENV as LOG_KEY_ENV
 
 # Separate from READBACK_LOG_KEY on purpose: the receiver needs this key to check
@@ -54,12 +54,13 @@ class WebhookAlert:
         self.client = client or httpx.Client(timeout=5.0)
         key = os.environ.get(ALERT_KEY_ENV) if key is None else key
         self.key = key.encode() if isinstance(key, str) else key or None
-        if self.key and is_log_key(self.key):
-            raise ValueError(f"the alert key must differ from {LOG_KEY_ENV}: the alert receiver must not hold the log key")
-        if self.key and is_receipt_key(self.key):
-            raise ValueError(f"the alert key must differ from {_RECEIPT_KEY_ENV}: the alert receiver must not be able to forge receipts")
         if self.key:
-            _ALERT_KEY_FINGERPRINTS.add(_alert_fingerprint(self.key))
+            with KEY_REGISTRY_LOCK:
+                if is_log_key(self.key):
+                    raise ValueError(f"the alert key must differ from {LOG_KEY_ENV}: the alert receiver must not hold the log key")
+                if is_receipt_key(self.key):
+                    raise ValueError(f"the alert key must differ from {_RECEIPT_KEY_ENV}: the alert receiver must not be able to forge receipts")
+                _ALERT_KEY_FINGERPRINTS.add(_alert_fingerprint(self.key))
         self.last_error: Exception | None = None
 
     def __call__(self, verdict: Verdict) -> None:
