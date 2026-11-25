@@ -153,11 +153,12 @@ def test_receipt_key_equal_to_the_alert_key_is_refused(monkeypatch):
 
 def test_a_receipt_log_key_is_not_registered_as_a_log_key(tmp_path):
     from agent_readback import WebhookAlert
+    from agent_readback.evidence import is_log_key
 
     ReceiptLog(tmp_path / "r.jsonl", key=KEY)
-    WebhookAlert("https://alerts.test", key=KEY)  # the receipt log did not mark its key as a log key
-    with pytest.raises(ReceiptKeyError, match="READBACK_ALERT_KEY"):
-        issue_receipt(refund_verdict(), KEY)  # but an alert now signs with it, so it is no receipt key
+    assert not is_log_key(KEY.encode())  # the receipt log did not mark its key as a log key
+    with pytest.raises(ValueError, match="READBACK_RECEIPT_KEY"):
+        WebhookAlert("https://alerts.test", key=KEY)  # but it is a receipt key now, so no alert may sign with it
 
 
 # -- verify one receipt (FR-5, SEC-4) ---------------------------------------------------

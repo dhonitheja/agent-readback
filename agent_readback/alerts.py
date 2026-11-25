@@ -26,6 +26,28 @@ def _alert_fingerprint(key: bytes) -> str:
     return hashlib.sha256(b"readback-alert-key:" + key).hexdigest()
 
 
+# Fingerprints of the receipt keys checked in this process, so a WebhookAlert
+# made after a receipt key is in use refuses that key too.
+_RECEIPT_KEY_FINGERPRINTS: set[str] = set()
+_RECEIPT_KEY_ENV = "READBACK_RECEIPT_KEY"  # receipts.RECEIPT_KEY_ENV; receipts imports this module
+
+
+def _receipt_fingerprint(key: bytes) -> str:
+    return hashlib.sha256(b"readback-receipt-key:" + key).hexdigest()
+
+
+def note_receipt_key(key: bytes) -> None:
+    """Record that `key` signs receipts in this process (called by receipts.receipt_key)."""
+    if key:
+        _RECEIPT_KEY_FINGERPRINTS.add(_receipt_fingerprint(key))
+
+
+def is_receipt_key(key: bytes) -> bool:
+    """True if `key` is READBACK_RECEIPT_KEY or a receipt key already used in this process."""
+    env = os.environ.get(_RECEIPT_KEY_ENV, "").encode()
+    return bool(key) and ((bool(env) and hmac.compare_digest(key, env)) or _receipt_fingerprint(key) in _RECEIPT_KEY_FINGERPRINTS)
+
+
 def is_alert_key(key: bytes) -> bool:
     """True if `key` is READBACK_ALERT_KEY or a key a WebhookAlert in this process signs with."""
     env = os.environ.get(ALERT_KEY_ENV, "").encode()
@@ -56,6 +78,8 @@ class WebhookAlert:
         self.key = key.encode() if isinstance(key, str) else key or None
         if self.key and is_log_key(self.key):
             raise ValueError(f"the alert key must differ from {LOG_KEY_ENV}: the alert receiver must not hold the log key")
+        if self.key and is_receipt_key(self.key):
+            raise ValueError(f"the alert key must differ from {_RECEIPT_KEY_ENV}: the alert receiver must not be able to forge receipts")
         if self.key:
             _ALERT_KEY_FINGERPRINTS.add(_alert_fingerprint(self.key))
         self.last_error: Exception | None = None

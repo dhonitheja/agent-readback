@@ -56,7 +56,7 @@ def main(argv: list[str] | None = None) -> int:
     rec = commands.add_parser("reconcile", help="read back every outcome in an export and write one receipt each")
     rec.add_argument("outcomes", help="CSV (outcome_id, action, expected fields) or JSONL outcome export")
     rec.add_argument("--system", required=True, choices=("stripe", "fhir"))
-    rec.add_argument("--receipts", required=True, metavar="FILE", help="receipt log to create or append to")
+    rec.add_argument("--receipts", required=True, metavar="FILE", help="receipt log to create or append to; effects it already billed are not billed again")
     rec.add_argument("--base-url", help="system of record (https; Stripe defaults to https://api.stripe.com)")
     rec.add_argument("--since", help="Stripe: ignore refunds created before this date (e.g. 2026-11-01)")
     rec.add_argument("--prior", action="append", default=[], metavar="FILE",

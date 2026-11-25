@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import functools
 import inspect
+import warnings
 from typing import Any, Callable, Iterable
 
 from .core import Claim, Verdict, Verifier, Watch, _check, watch
@@ -130,8 +131,12 @@ def _issue_keeping(error: BaseException, issue: Callable[..., Any], *args: Any) 
     try:
         issue(*args)
     except Exception as secondary:  # the tool's own exception is what the caller handles
-        if hasattr(error, "add_note"):  # Python 3.11+
-            error.add_note(f"readback: receipt step failed: {type(secondary).__name__}: {secondary}")
+        note = f"readback: receipt step failed: {type(secondary).__name__}: {secondary}"
+        add_note = getattr(error, "add_note", None)
+        if callable(add_note):  # Python 3.11+
+            add_note(note)
+        else:  # Python 3.10: no notes, so report it as a warning rather than lose it
+            warnings.warn(note, RuntimeWarning, stacklevel=3)
 
 
 class _Seen:

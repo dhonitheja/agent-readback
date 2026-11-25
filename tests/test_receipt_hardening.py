@@ -449,6 +449,32 @@ def test_an_alert_key_given_only_in_code_is_refused_as_a_receipt_key():
         issue_receipt(verdict(), alert_key)
 
 
+def test_a_receipt_key_already_in_use_is_refused_as_an_alert_key():
+    from agent_readback import WebhookAlert
+
+    issue_receipt(verdict(), KEY)  # the receipt key is in use first
+    with pytest.raises(ValueError, match="READBACK_RECEIPT_KEY"):
+        WebhookAlert("https://alerts.test/hook", key=KEY)
+    WebhookAlert("https://alerts.test/hook", key="a-distinct-alert-key-0123456789abcdef")  # a distinct key is fine
+
+
+def test_a_receipt_failure_is_a_warning_where_exceptions_take_no_notes():
+    from agent_readback.adapters import _issue_keeping
+
+    class ToolError(Exception):
+        pass
+
+    error = ToolError("upstream timeout")
+    error.add_note = None  # as on Python 3.10, which has no exception notes
+
+    def broken_issue():
+        raise OSError("disk full")
+
+    with pytest.warns(RuntimeWarning, match="receipt step failed: OSError"):
+        _issue_keeping(error, broken_issue)
+    assert not hasattr(error, "__notes__")
+
+
 def test_a_receipt_log_written_with_another_key_is_never_appended_to(tmp_path):
     other = "another-receipt-key-0123456789abcdef-test"
     ReceiptLog(tmp_path / "r.jsonl", key=other).append(issue_receipt(verdict(), other))
@@ -578,6 +604,23 @@ def test_a_public_check_catches_a_body_swapped_for_another_genuine_receipt(tmp_p
     count, problems = verify_signed_receipts(swapped, private.public_key())
     assert count == 3 and any("record 1: its place in the log does not verify" in p for p in problems)
     assert verify_signed_receipts(log.path, private.public_key()) == (3, [])
+
+
+def test_a_public_check_rejects_a_missing_or_malformed_hash(tmp_path):
+    _, private, lines = _signed_log(tmp_path)
+    first, second = json.loads(lines[0]), json.loads(lines[1])
+    del first["hash"]
+    second["prev"] = None  # a missing hash and a null prev must not count as linked
+    unlinked = _write(tmp_path, "unlinked.jsonl", [json.dumps(first), json.dumps(second), lines[2]])
+    problems = verify_signed_receipts(unlinked, private.public_key())[1]
+    assert "record 0: missing or malformed hash" in problems
+    assert any(p.startswith("record 1: out of order") for p in problems)
+    first = json.loads(lines[0])
+    first["hash"] = "XYZ"
+    second = json.loads(lines[1])
+    second["prev"] = "XYZ"
+    malformed = _write(tmp_path, "malformed.jsonl", [json.dumps(first), json.dumps(second), lines[2]])
+    assert "record 0: missing or malformed hash" in verify_signed_receipts(malformed, private.public_key())[1]
 
 
 def test_a_public_check_catches_a_dropped_receipt_with_rewritten_links(tmp_path):

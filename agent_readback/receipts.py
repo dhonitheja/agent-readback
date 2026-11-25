@@ -39,7 +39,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
-from .alerts import ALERT_KEY_ENV, is_alert_key
+from .alerts import ALERT_KEY_ENV, is_alert_key, note_receipt_key
 from .core import FindingKind, Status, Verdict
 from .evidence import KEY_ENV as LOG_KEY_ENV
 from .evidence import EvidenceLog, is_log_key
@@ -53,13 +53,12 @@ _MAC_DOMAIN = b"readback-receipt-v1:"
 LOG_FORMAT = 2  # a record whose place in the log is signed; format 1 records carry no `place`
 _PLACE_DOMAIN = b"readback-place-v2:"
 PLACE_GENESIS = "0" * 64
+_NO_LINK = object()  # stands for a broken link: equal to no `prev`, null included
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
 _HEX128 = re.compile(r"^[0-9a-f]{128}$")
 _OUTCOME_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")  # first character never a spreadsheet formula
 _ACTION = re.compile(r"^[a-z0-9_]+(\.[a-z0-9_]+){1,4}$")
 _RECEIPT_ID = re.compile(r"^rcpt_[0-9a-f]{32}$")
-_HEX64 = re.compile(r"^[0-9a-f]{64}$")
-_HEX128 = re.compile(r"^[0-9a-f]{128}$")
 
 # Value-free descriptions of each read-back, so a receipt says where it looked
 # without saying which customer it looked at.
@@ -139,6 +138,7 @@ def receipt_key(key: bytes | str | None = None) -> bytes:
         raise ReceiptKeyError(f"the receipt key must differ from {LOG_KEY_ENV}: receipts leave the machine, the log key must not")
     if is_alert_key(raw):
         raise ReceiptKeyError(f"the receipt key must differ from {ALERT_KEY_ENV}")
+    note_receipt_key(raw)  # so a WebhookAlert made later in this process refuses it
     return raw
 
 
@@ -578,7 +578,7 @@ def verify_signed_receipts(path: str | Path, public_key: Any, *, allow_v1: bool 
     Returns (number of receipts, problems).
     """
     problems: list[str] = []
-    previous = "0" * 64
+    previous: object = "0" * 64
     records: list[dict[str, Any]] = []
     with open(path, encoding="utf-8") as handle:
         for number, line in enumerate(handle):
@@ -595,7 +595,12 @@ def verify_signed_receipts(path: str | Path, public_key: Any, *, allow_v1: bool 
             problem = verify_receipt(body, public_key=public_key) if isinstance(body, dict) else "no receipt body"
             if problem:
                 problems.append(f"record {number}: {problem}")
-            previous = record.get("hash") if isinstance(record, dict) else None
+            link = record.get("hash") if isinstance(record, dict) else None
+            if isinstance(link, str) and _HEX64.fullmatch(link):
+                previous = link
+            else:  # a missing or malformed hash links to nothing, so no record can follow it
+                problems.append(f"record {number}: missing or malformed hash")
+                previous = _NO_LINK
     place_problems, _ = check_places(records, public_key, allow_v1=allow_v1)
     problems += place_problems
     if head is not None:
