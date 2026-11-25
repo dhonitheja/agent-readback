@@ -475,6 +475,24 @@ def test_a_receipt_failure_is_a_warning_where_exceptions_take_no_notes():
     assert not hasattr(error, "__notes__")
 
 
+def test_a_receipt_failure_never_replaces_the_tools_exception_with_warnings_as_errors(caplog):
+    import warnings
+
+    from agent_readback.adapters import _issue_keeping
+
+    error = ValueError("upstream timeout")
+    error.add_note = None  # as on Python 3.10
+
+    def broken_issue():
+        raise OSError("disk full")
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        with caplog.at_level("WARNING", logger="agent_readback"):
+            _issue_keeping(error, broken_issue)  # must not raise the RuntimeWarning in place of the tool's error
+    assert "receipt step failed: OSError" in caplog.text
+
+
 def test_a_receipt_log_written_with_another_key_is_never_appended_to(tmp_path):
     other = "another-receipt-key-0123456789abcdef-test"
     ReceiptLog(tmp_path / "r.jsonl", key=other).append(issue_receipt(verdict(), other))

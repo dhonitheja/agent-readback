@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import functools
 import inspect
+import logging
 import warnings
 from typing import Any, Callable, Iterable
 
@@ -136,7 +137,10 @@ def _issue_keeping(error: BaseException, issue: Callable[..., Any], *args: Any) 
         if callable(add_note):  # Python 3.11+
             add_note(note)
         else:  # Python 3.10: no notes, so report it as a warning rather than lose it
-            warnings.warn(note, RuntimeWarning, stacklevel=3)
+            try:
+                warnings.warn(note, RuntimeWarning, stacklevel=3)
+            except Warning:  # warnings set to errors: log it, and keep the tool's own exception
+                logging.getLogger("agent_readback").warning(note)
 
 
 class _Seen:
