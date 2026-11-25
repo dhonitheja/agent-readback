@@ -280,6 +280,20 @@ def reconcile_main(args: argparse.Namespace) -> int:
     return OK if summary["verified"] == summary["billed"] else BROKEN
 
 
+def _format_1_records(path: Path) -> int:
+    """How many records in a receipt log carry no signed place (log format 1)."""
+    count = 0
+    with open(path, encoding="utf-8") as handle:
+        for line in handle:
+            try:
+                record = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(record, dict) and not isinstance(record.get("place"), dict):
+                count += 1
+    return count
+
+
 def verify_receipts_main(args: argparse.Namespace) -> int:
     path = Path(args.path)
     if not path.is_file():
@@ -302,6 +316,7 @@ def verify_receipts_main(args: argparse.Namespace) -> int:
             try:
                 count, problems = verify_signed_receipts(path, public_key, allow_v1=args.allow_v1, head=args.head)
                 public_head = ReceiptLog.public_head_of(path)
+                unplaced = _format_1_records(path)
             except (OSError, UnicodeDecodeError) as error:
                 print(f"ERROR: cannot read {args.path}: {error}", file=sys.stderr)
                 return FILE_ERROR
@@ -309,7 +324,11 @@ def verify_receipts_main(args: argparse.Namespace) -> int:
                 print(f"BROKEN: {problem}")
             if problems:
                 return BROKEN
-            print(f"OK: {count} receipts, every signature verifies and each signed receipt is where the issuer wrote it")
+            if unplaced:  # only allowed with --allow-v1; their place is not signed
+                print(f"OK: {count} receipts, every signature verifies; {unplaced} are log format 1, whose place in the log "
+                      "is not signed, so a swapped, moved or dropped one is not caught without the receipt key")
+            else:
+                print(f"OK: {count} receipts, every signature verifies and each signed receipt is where the issuer wrote it")
             if public_head:
                 print(f"public head: {public_head}")
             if not args.head:

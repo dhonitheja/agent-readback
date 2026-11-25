@@ -663,7 +663,11 @@ def test_format_1_receipts_need_the_allow_v1_flag(tmp_path, monkeypatch, capsys)
     assert len(problems) == 2 and all("log format 1" in p and "--allow-v1" in p for p in problems)
     assert verify_signed_receipts(old.path, private.public_key(), allow_v1=True) == (2, [])
     assert main(["verify-receipts", str(old.path), "--public-key", str(public_path)]) == 1
+    capsys.readouterr()
     assert main(["verify-receipts", str(old.path), "--public-key", str(public_path), "--allow-v1"]) == 0
+    out = capsys.readouterr().out
+    assert "2 are log format 1" in out and "not caught without the receipt key" in out  # never claims their place
+    assert "where the issuer wrote it" not in out
     monkeypatch.setenv(RECEIPT_KEY_ENV, KEY)  # the keyed chain covers place, but the public-key check still asks
     assert main(["verify-receipts", str(old.path), "--public-key", str(public_path)]) == 1
     assert main(["verify-receipts", str(old.path), "--public-key", str(public_path), "--allow-v1"]) == 0
