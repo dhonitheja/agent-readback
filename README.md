@@ -252,6 +252,10 @@ readback reconcile november.csv --system stripe --receipts r.jsonl --signing-key
 readback verify-receipts r.jsonl --public-key issuer.pub.pem   # no receipt key needed
 ```
 
+The public-key check proves every receipt is yours and unedited. It cannot
+prove the log is complete: a receipt swapped for another of your genuine
+receipts, or records dropped, are only caught with the receipt key.
+
 Reconcile a vendor's outcome export against Stripe:
 
 ```bash

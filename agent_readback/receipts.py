@@ -453,8 +453,10 @@ def verify_signed_receipts(path: str | Path, public_key: Any) -> tuple[int, list
     """Check a receipt log you did not write, with the issuer's Ed25519 public key only.
 
     Proves each receipt came from the issuer and was not edited, and that the
-    records still link up. It cannot recompute the keyed chain, so a full
-    rewrite of the links or dropped newest records need the issuer's anchor.
+    seq and prev fields still link up. It cannot recompute the keyed chain, so
+    it does not catch a body swapped for another genuine signed receipt, a
+    dropped record whose links were rewritten, or dropped newest records.
+    Those checks need the receipt key (verify-receipts with --anchor or --head).
     Returns (number of receipts, problems).
     """
     problems: list[str] = []

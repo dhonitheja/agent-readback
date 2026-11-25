@@ -67,11 +67,15 @@ know of has a defence and a test, and that what is left is written down.
   who can make receipts. Keep them in a secrets manager or an owner-only file,
   never in the repo, and rotate them if a machine is lost. Publish only the
   public key.
-- **Completeness for a public verifier.** With only the public key, a buyer
-  can prove each receipt is genuine and unedited, and that the records link,
-  but cannot recompute the keyed chain. To catch dropped newest receipts,
-  share the anchor head (`FileAnchor`) through a channel the issuer cannot
-  rewrite later.
+- **Completeness for a public verifier (open).** With only the public key, a
+  buyer can prove each receipt is a genuine, unedited issuer receipt and that
+  the `seq` and `prev` fields link, but cannot recompute the keyed chain. So
+  a public-only check does not catch a record whose body was swapped for
+  another genuine signed receipt, a dropped record whose links were rewritten,
+  or dropped newest records. `--anchor` and `--head` need the receipt key, so
+  they do not help a public-only verifier. A full fix binds each signature to
+  its chain position (sign the sequence number and the previous hash too);
+  that changes the receipt format and is left for a later version.
 - **Folder access.** Keep receipt and evidence logs in a folder only the
   writer can change.
 - No build can promise that a breach is impossible. These are the threats we
