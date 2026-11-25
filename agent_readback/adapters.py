@@ -127,35 +127,48 @@ class OutcomeNotVerified(RuntimeError):
         super().__init__(f"outcome not verified: {receipt.verdict}" + (f" ({', '.join(kinds)})" if kinds else ""))
 
 
+def _attach(error: BaseException, note: str) -> None:
+    """Add `note` to `error` without replacing it: a note on 3.11+, else a warning, else a log line."""
+    add_note = getattr(error, "add_note", None)
+    if callable(add_note):  # Python 3.11+
+        add_note(note)
+        return
+    try:  # Python 3.10: no notes, so report it as a warning rather than lose it
+        warnings.warn(note, RuntimeWarning, stacklevel=4)
+    except Warning:  # warnings set to errors: log it, and keep the tool's own exception
+        logging.getLogger("agent_readback").warning(note)
+
+
 def _issue_keeping(error: BaseException, issue: Callable[..., Any], *args: Any) -> None:
     """Issue the receipt for a call that raised, without letting a receipt failure replace its exception."""
     try:
         issue(*args)
     except Exception as secondary:  # the tool's own exception is what the caller handles
-        note = f"readback: receipt step failed: {type(secondary).__name__}: {secondary}"
-        add_note = getattr(error, "add_note", None)
-        if callable(add_note):  # Python 3.11+
-            add_note(note)
-        else:  # Python 3.10: no notes, so report it as a warning rather than lose it
-            try:
-                warnings.warn(note, RuntimeWarning, stacklevel=3)
-            except Warning:  # warnings set to errors: log it, and keep the tool's own exception
-                logging.getLogger("agent_readback").warning(note)
+        _attach(error, f"readback: receipt step failed: {type(secondary).__name__}: {secondary}")
 
 
 class _Seen:
     """The evidence log for one `receipted()` call: keeps each verdict before writing it on.
 
-    So a failed evidence-log write still leaves the verdict for the receipt.
+    So a failed evidence-log write still leaves the verdict for the receipt. The
+    write error is held, not raised here, so it cannot replace the tool's own
+    exception; `receipted()` raises it once the receipt is issued.
     """
 
     def __init__(self, log: Any) -> None:
         self.verdicts: list[Verdict] = []
+        self.log_error: Exception | None = None
         self._log = log
 
     def append(self, verdict: Verdict) -> Any:
         self.verdicts.append(verdict)
-        return None if self._log is None else self._log.append(verdict)
+        if self._log is None:
+            return None
+        try:
+            return self._log.append(verdict)
+        except Exception as error:  # noqa: BLE001 - any write failure is held and re-raised by receipted()
+            self.log_error = error
+            return None
 
 
 def receipted(
@@ -179,9 +192,10 @@ def receipted(
     LangGraph `ToolNode` the error becomes the tool message the model reads; on
     an MCP `ClientSession.call_tool` the caller gets the exception. If `fn`
     itself raises, its receipt is still issued and its own exception propagates;
-    if issuing that receipt fails too, the failure is added to it as a note.
-    If writing the evidence log fails, the receipt is still issued from the
-    verdict and the logging error propagates.
+    if issuing that receipt or writing the evidence log fails too, the failure
+    is added to it as a note. If writing the evidence log fails after a call
+    that did not raise, the receipt is still issued from the verdict and the
+    logging error propagates.
 
     `outcome_id(*args, **kwargs)` may return an id to store on the receipt.
 
@@ -210,6 +224,12 @@ def receipted(
         if receipt is not None and not receipt.billable:
             raise OutcomeNotVerified(receipt)
 
+    def finish(seen: _Seen, args: tuple[Any, ...], kwargs: dict[str, Any]) -> None:
+        if seen.log_error is not None:  # the call returned, but its evidence was not written
+            _issue_keeping(seen.log_error, issue, seen, args, kwargs)
+            raise seen.log_error
+        gate(issue(seen, args, kwargs))
+
     if _is_async(fn):
 
         @functools.wraps(fn)
@@ -218,9 +238,11 @@ def receipted(
             try:
                 result = await inner(seen)(*args, **kwargs)
             except BaseException as error:
+                if seen.log_error is not None:
+                    _attach(error, f"readback: evidence log write failed: {type(seen.log_error).__name__}: {seen.log_error}")
                 _issue_keeping(error, issue, seen, args, kwargs)
                 raise
-            gate(issue(seen, args, kwargs))
+            finish(seen, args, kwargs)
             return result
 
         return run_async
@@ -231,9 +253,11 @@ def receipted(
         try:
             result = inner(seen)(*args, **kwargs)
         except BaseException as error:
+            if seen.log_error is not None:
+                _attach(error, f"readback: evidence log write failed: {type(seen.log_error).__name__}: {seen.log_error}")
             _issue_keeping(error, issue, seen, args, kwargs)
             raise
-        gate(issue(seen, args, kwargs))
+        finish(seen, args, kwargs)
         return result
 
     return run

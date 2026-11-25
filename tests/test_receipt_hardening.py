@@ -616,6 +616,36 @@ def test_a_failed_evidence_log_write_still_leaves_a_receipt(tmp_path, is_async):
     assert [r["verdict"] for r in receipts.receipts()] == ["verified"]
 
 
+@pytest.mark.parametrize("is_async", [False, True])
+def test_a_failed_evidence_log_write_never_replaces_the_tools_exception(tmp_path, is_async):
+    import asyncio
+    import sys
+
+    class ToolError(Exception):
+        pass
+
+    stripe = Stripe()
+    receipts = ReceiptLog(tmp_path / "r.jsonl", key=KEY)
+
+    def issue_refund(amount):
+        stripe.refund("pi_A1", amount)  # the refund lands, then the tool fails
+        raise ToolError("upstream timeout")
+
+    async def issue_refund_async(amount):
+        return issue_refund(amount)
+
+    def to_claim(amount):
+        return Claim("stripe.refund.create", "", {"payment_intent": "pi_A1", "amount": amount})
+
+    fn = issue_refund_async if is_async else issue_refund
+    refund = receipted(fn, StripeRefundVerifier(stripe.client()), to_claim, receipts, log=BrokenEvidenceLog())
+    with pytest.raises(ToolError, match="upstream timeout") as caught:
+        asyncio.run(refund(2500)) if is_async else refund(2500)
+    assert [r["verdict"] for r in receipts.receipts()] == ["verified"]  # the receipt is still issued
+    if sys.version_info >= (3, 11):
+        assert any("evidence log write failed: OSError" in note for note in caught.value.__notes__)
+
+
 def test_a_receipt_log_bills_each_effect_once(tmp_path):
     from agent_readback import AlreadyBilled
 
