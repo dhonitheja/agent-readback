@@ -1,4 +1,5 @@
-"""Command line: `readback verify-log FILE`, `readback report FILE`, `readback dashboard FILE -o OUT.html`.
+"""Command line: `readback verify-log FILE`, `readback report FILE`, `readback dashboard FILE -o OUT.html`,
+`readback reconcile OUTCOMES --system stripe|fhir --receipts OUT.jsonl`, `readback verify-receipts FILE`.
 
 Set READBACK_LOG_KEY to the key the log was written with. Without a key the
 chain only detects accidental damage: anyone can rebuild an unkeyed chain, so
@@ -6,16 +7,30 @@ an unkeyed OK is flagged as not forgery-proof. Pass --require-key to fail
 instead (use it in audits).
 
 Exit codes: 0 intact, 1 broken or untrustworthy, 2 bad arguments, 3 file error.
+For `reconcile`: 0 every outcome verified, 1 some did not, 2 bad arguments, 3 input or file error.
+
+`reconcile` reads credentials from the environment only, never from flags:
+READBACK_STRIPE_KEY (a restricted read-only rk_ key) or READBACK_FHIR_TOKEN
+(optional bearer token with read scope), and READBACK_RECEIPT_KEY for receipts.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
+import os
 import sys
 from pathlib import Path
 
+import httpx
+
 from .dashboard import render_html
 from .evidence import KEY_ENV, EvidenceLog, FileAnchor
+from .ratelimit import RateLimit, limit_reads
+from .receipts import RECEIPT_KEY_ENV, ReceiptKeyError, ReceiptLog, load_public_key, load_signing_key, verify_signed_receipts
+from .reconcile import MAX_ROWS, METADATA_KEY, ExportError, FhirAppointments, StripeRefunds, load_outcomes, parse_since, prior_effects, reconcile
+from .reconcile import render as render_reconciliation
+from .reconcile import summarise as summarise_reconciliation
 from .report import render, summarise
 
 OK, BROKEN, USAGE, FILE_ERROR = 0, 1, 2, 3
@@ -37,7 +52,41 @@ def main(argv: list[str] | None = None) -> int:
     anchored = subs[0].add_mutually_exclusive_group()
     anchored.add_argument("--anchor", metavar="FILE", help="fail unless the log still holds the head recorded by FileAnchor")
     anchored.add_argument("--head", metavar="HASH", help="fail unless the log still holds this head hash (from an earlier verify-log)")
+
+    rec = commands.add_parser("reconcile", help="read back every outcome in an export and write one receipt each")
+    rec.add_argument("outcomes", help="CSV (outcome_id, action, expected fields) or JSONL outcome export")
+    rec.add_argument("--system", required=True, choices=("stripe", "fhir"))
+    rec.add_argument("--receipts", required=True, metavar="FILE", help="receipt log to create or append to; effects it already billed are not billed again")
+    rec.add_argument("--base-url", help="system of record (https; Stripe defaults to https://api.stripe.com)")
+    rec.add_argument("--since", help="Stripe: ignore refunds created before this date (e.g. 2026-11-01)")
+    rec.add_argument("--prior", action="append", default=[], metavar="FILE",
+                     help="earlier receipt log; effects it billed cannot back a new outcome (repeatable)")
+    rec.add_argument("--json", action="store_true", help="print the summary as JSON")
+    rec.add_argument("--max-rate", type=float, default=20.0, help="reads per second (default 20; Stripe allows 25)")
+    rec.add_argument("--max-rows", type=int, default=MAX_ROWS, help=f"refuse exports with more outcomes (default {MAX_ROWS})")
+    rec.add_argument("--keep-outcome-ids", action="store_true",
+                     help="store outcome ids in receipts as given (default: a keyed oid_ stand-in; the report still shows yours)")
+    rec.add_argument("--match-metadata", metavar="KEY",
+                     help="Stripe: a refund only counts if its metadata[KEY] equals the outcome id")
+    rec.add_argument("--signing-key", metavar="FILE",
+                     help=f"also sign receipts with this Ed25519 PEM private key (owner-only; password in {SIGNING_PASSWORD_ENV})")
+
+    ver = commands.add_parser("verify-receipts", help="check a receipt log's chain and every receipt's MAC")
+    ver.add_argument("path")
+    anchored = ver.add_mutually_exclusive_group()
+    anchored.add_argument("--anchor", metavar="FILE", help="fail unless the log still holds the head recorded by FileAnchor")
+    anchored.add_argument("--head", metavar="HASH",
+                          help="fail unless the log still holds this head hash (with --public-key and no receipt key: the issuer's public head)")
+    ver.add_argument("--public-key", metavar="FILE",
+                     help=f"check Ed25519 signatures with the issuer's public key; without {RECEIPT_KEY_ENV}, signatures and each receipt's signed place are checked")
+    ver.add_argument("--allow-v1", action="store_true",
+                     help="with --public-key: accept older receipts (log format 1) whose place in the log is not signed")
     args = parser.parse_args(argv)
+
+    if args.command == "reconcile":
+        return reconcile_main(args)
+    if args.command == "verify-receipts":
+        return verify_receipts_main(args)
 
     path = Path(args.path)
     if not path.is_file():
@@ -119,6 +168,208 @@ def main(argv: list[str] | None = None) -> int:
     if not intact:
         print(f"WARNING: chain broken at {where}; figures above may not be trustworthy")
         return BROKEN
+    return OK
+
+
+STRIPE_KEY_ENV = "READBACK_STRIPE_KEY"
+FHIR_TOKEN_ENV = "READBACK_FHIR_TOKEN"  # nosec B105 - name of an environment variable, not a secret
+SIGNING_PASSWORD_ENV = "READBACK_SIGNING_KEY_PASSWORD"  # nosec B105 - name of an environment variable, not a secret  # pragma: allowlist secret
+STRIPE_HOST = "api.stripe.com"
+_LOOPBACK = {"localhost", "127.0.0.1", "::1"}
+_transport: httpx.BaseTransport | None = None  # tests swap in httpx.MockTransport
+
+
+def _base_url(raw: str) -> httpx.URL:
+    try:
+        url = httpx.URL(raw)
+    except httpx.InvalidURL:
+        raise ValueError("--base-url is not a valid URL") from None
+    if url.userinfo:
+        raise ValueError("--base-url must not contain credentials; use the environment variables")
+    if url.query or url.fragment:
+        raise ValueError("--base-url must not have a query or fragment")
+    if not url.host or not (url.scheme == "https" or (url.scheme == "http" and url.host in _LOOPBACK)):
+        raise ValueError("--base-url must be https (plain http only for localhost)")
+    return url
+
+
+def _client(system: str, base_url: str | None) -> httpx.Client:
+    """A read-only client with credentials from the environment. Never prints them."""
+    if system == "stripe":
+        key = os.environ.get(STRIPE_KEY_ENV, "").strip()
+        if not key.startswith("rk_"):
+            raise ValueError(f"set {STRIPE_KEY_ENV} to a restricted read-only Stripe key (rk_...); secret keys are refused")
+        url = _base_url(base_url or f"https://{STRIPE_HOST}")
+        if url.host != STRIPE_HOST and url.host not in _LOOPBACK:
+            # The key is sent to this host: only Stripe itself, or a local stripe-mock.
+            raise ValueError(f"--base-url for Stripe must be https://{STRIPE_HOST} or a localhost stripe-mock")
+        return httpx.Client(base_url=url, auth=(key, ""), timeout=10.0, transport=_transport)
+    if not base_url:
+        raise ValueError("--base-url is required for --system fhir")
+    headers = {"Accept": "application/fhir+json"}
+    token = os.environ.get(FHIR_TOKEN_ENV, "").strip()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return httpx.Client(base_url=_base_url(base_url), headers=headers, timeout=10.0, transport=_transport)
+
+
+def reconcile_main(args: argparse.Namespace) -> int:
+    from .verifiers import FhirAppointmentVerifier, StripeRefundVerifier
+
+    try:
+        if not args.max_rate > 0 or args.max_rows < 1:
+            raise ValueError("--max-rate and --max-rows must be positive")
+        since = parse_since(args.since) if args.since else None
+        if since is not None and args.system != "stripe":
+            raise ValueError("--since applies to --system stripe only")
+        if args.match_metadata and args.system != "stripe":
+            raise ValueError("--match-metadata applies to --system stripe only")
+        if args.match_metadata and not METADATA_KEY.fullmatch(args.match_metadata):
+            raise ValueError("--match-metadata must be 1-40 of A-Z a-z 0-9 _ -")
+        signing_key = None
+        if args.signing_key:
+            password = os.environ.get(SIGNING_PASSWORD_ENV)
+            signing_key = load_signing_key(args.signing_key, password.encode() if password else None)
+        client = _client(args.system, args.base_url)
+    except ImportError as error:
+        print(f"ERROR: {error}", file=sys.stderr)
+        return USAGE
+    except OSError as error:
+        print(f"ERROR: cannot read the signing key: {error.strerror or error}", file=sys.stderr)
+        return FILE_ERROR
+    except (ValueError, TypeError, ReceiptKeyError) as error:
+        print(f"ERROR: {error}", file=sys.stderr)
+        return USAGE
+    with client:
+        try:
+            outcomes = load_outcomes(args.outcomes, system=args.system, max_rows=args.max_rows)
+            prior = prior_effects(args.prior, public_key=signing_key.public_key() if signing_key else None)
+            receipts = ReceiptLog(args.receipts, signing_key=signing_key)
+        except ReceiptKeyError as error:
+            print(f"ERROR: {error}", file=sys.stderr)
+            return USAGE
+        except (ExportError, ValueError) as error:
+            print(f"ERROR: {error}", file=sys.stderr)
+            return FILE_ERROR
+        except OSError as error:
+            print(f"ERROR: cannot open a receipt log: {error.strerror or error}", file=sys.stderr)
+            return FILE_ERROR
+        limit_reads(client, RateLimit(args.max_rate))
+        origin = client.base_url.copy_with(path="/")
+        print(f"reading {args.system} at {origin} with {'a read-only key' if args.system == 'stripe' else 'the configured token'}",
+              file=sys.stderr)
+        if args.system == "stripe":
+            finder = StripeRefunds(StripeRefundVerifier(client), since=since, match_metadata=args.match_metadata)
+        else:
+            finder = FhirAppointments(FhirAppointmentVerifier(client))
+        labels: dict[str, str] = {}
+        try:
+            made = reconcile(outcomes, finder, receipts.key, prior=prior, receipts=receipts,
+                             keep_outcome_ids=args.keep_outcome_ids, labels=labels)
+        except ValueError as error:  # the receipt log does not verify, or refused a receipt
+            print(f"ERROR: {error} ({receipts.path.name} now holds {len(receipts.records())} receipt(s))", file=sys.stderr)
+            return FILE_ERROR
+        except OSError as error:
+            print(f"ERROR: cannot write the receipt log: {error.strerror or error}", file=sys.stderr)
+            return FILE_ERROR
+    summary = summarise_reconciliation(made, labels)
+    print(json.dumps(summary, indent=2) if args.json else render_reconciliation(summary))
+    print(f"{len(made)} receipt(s) appended to {args.receipts}; head: {receipts.head}", file=sys.stderr)
+    if receipts.place_head:
+        print(f"public head (publish it with the log for buyers who check with your public key): {receipts.place_head}", file=sys.stderr)
+    return OK if summary["verified"] == summary["billed"] else BROKEN
+
+
+def _format_1_records(path: Path) -> int:
+    """How many records in a receipt log carry no signed place (log format 1)."""
+    count = 0
+    with open(path, encoding="utf-8") as handle:
+        for line in handle:
+            try:
+                record = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(record, dict) and not isinstance(record.get("place"), dict):
+                count += 1
+    return count
+
+
+def verify_receipts_main(args: argparse.Namespace) -> int:
+    path = Path(args.path)
+    if not path.is_file():
+        print(f"ERROR: no such file: {args.path}", file=sys.stderr)
+        return FILE_ERROR
+    public_key = None
+    if args.public_key:
+        try:
+            public_key = load_public_key(args.public_key)
+        except ImportError as error:
+            print(f"ERROR: {error}", file=sys.stderr)
+            return USAGE
+        except (OSError, ValueError, ReceiptKeyError) as error:
+            print(f"ERROR: cannot use public key {args.public_key}: {getattr(error, 'strerror', None) or error}", file=sys.stderr)
+            return FILE_ERROR
+        if not os.environ.get(RECEIPT_KEY_ENV):
+            if args.anchor:
+                print("ERROR: --anchor needs the receipt key; without it, pass the issuer's public head with --head", file=sys.stderr)
+                return USAGE
+            try:
+                count, problems = verify_signed_receipts(path, public_key, allow_v1=args.allow_v1, head=args.head)
+                public_head = ReceiptLog.public_head_of(path)
+                unplaced = _format_1_records(path)
+            except (OSError, UnicodeDecodeError) as error:
+                print(f"ERROR: cannot read {args.path}: {error}", file=sys.stderr)
+                return FILE_ERROR
+            for problem in problems:
+                print(f"BROKEN: {problem}")
+            if problems:
+                return BROKEN
+            if unplaced:  # only allowed with --allow-v1; their place is not signed
+                print(f"OK: {count} receipts, every signature verifies; {unplaced} are log format 1, whose place in the log "
+                      "is not signed, so a swapped, moved or dropped one is not caught without the receipt key")
+            else:
+                print(f"OK: {count} receipts, every signature verifies and each signed receipt is where the issuer wrote it")
+            if public_head:
+                print(f"public head: {public_head}")
+            if not args.head:
+                print("note: to catch dropped newest receipts, compare the public head with the one the issuer published (--head)")
+            return OK
+    try:
+        log = ReceiptLog(path, public_key=public_key, require_signed=public_key is not None, allow_v1=args.allow_v1)
+        problems = log.verify()
+        records = log.records()
+    except ReceiptKeyError as error:
+        print(f"ERROR: {error} ({RECEIPT_KEY_ENV})", file=sys.stderr)
+        return USAGE
+    except ValueError as error:
+        print(f"BROKEN: {error}", file=sys.stderr)
+        return BROKEN
+    except OSError as error:
+        print(f"ERROR: cannot read {args.path}: {error.strerror or error}", file=sys.stderr)
+        return FILE_ERROR
+    if problems:
+        for problem in problems:
+            print(f"BROKEN: {problem}")
+        return BROKEN
+    if args.anchor or args.head:
+        if args.anchor:
+            try:
+                count, head = FileAnchor(args.anchor).read()
+            except (OSError, ValueError) as error:
+                print(f"ERROR: cannot use anchor {args.anchor}: {error}", file=sys.stderr)
+                return FILE_ERROR
+        else:
+            wanted = args.head.strip().lower()
+            found = [i for i, record in enumerate(records) if record["hash"] == wanted]
+            count, head = (found[0] + 1, wanted) if found else (0, wanted)
+        problem = log.check_anchor(count, head) if count else "the given head is not in the log: receipts were dropped or rewritten"
+        if problem:
+            print(f"BROKEN: {problem}")
+            return BROKEN
+    print(f"OK: {len(records)} receipts, chain intact, every receipt verifies")
+    print(f"head: {log.head}")
+    if log.place_head:
+        print(f"public head: {log.place_head}")
     return OK
 
 

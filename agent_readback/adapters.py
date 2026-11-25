@@ -23,11 +23,19 @@ from __future__ import annotations
 import asyncio
 import functools
 import inspect
+import logging
+import warnings
 from typing import Any, Callable, Iterable
 
 from .core import Claim, Verdict, Verifier, Watch, _check, watch
 
 ToClaim = Callable[..., "Claim | None"]
+
+
+def _is_async(fn: Callable[..., Any]) -> bool:
+    # An object with `async def __call__` is not a coroutine function to inspect, but
+    # calling it returns a coroutine; treat it as async or the check runs before the write.
+    return inspect.iscoroutinefunction(fn) or inspect.iscoroutinefunction(getattr(fn, "__call__", None))
 
 
 def mcp_text(result: Any) -> str:
@@ -61,10 +69,8 @@ def watched(
     def final(probe: Claim, result: Any) -> Claim:
         return Claim(probe.action, said(result), probe.expected, probe.context)
 
-    # An object with `async def __call__` is not a coroutine function to inspect, but
-    # calling it returns a coroutine; treat it as async or the check runs before the write.
     # A plain sync function that returns an awaitable is not supported: wrap the async callee.
-    if inspect.iscoroutinefunction(fn) or inspect.iscoroutinefunction(getattr(fn, "__call__", None)):
+    if _is_async(fn):
 
         @functools.wraps(fn)
         async def run_async(*args: Any, **kwargs: Any) -> Any:
@@ -103,6 +109,155 @@ def watched(
         with watch(verifier, probe, log, on_verdict=callbacks, **watch_options) as w:
             result = fn(*args, **kwargs)
             w.claims(final(probe, result))
+        return result
+
+    return run
+
+
+class OutcomeNotVerified(RuntimeError):
+    """Raised by a `receipted()` call whose outcome did not verify. `.receipt` holds the receipt.
+
+    The message names the verdict and reason kinds only, never values, because
+    agent frameworks show it to the model and may log it.
+    """
+
+    def __init__(self, receipt: Any) -> None:
+        self.receipt = receipt
+        kinds = sorted({reason["kind"] for reason in receipt.reasons})
+        super().__init__(f"outcome not verified: {receipt.verdict}" + (f" ({', '.join(kinds)})" if kinds else ""))
+
+
+def _attach(error: BaseException, note: str) -> None:
+    """Add `note` to `error` without replacing it: a note on 3.11+, else a warning, else a log line."""
+    add_note = getattr(error, "add_note", None)
+    if callable(add_note):  # Python 3.11+
+        add_note(note)
+        return
+    try:  # Python 3.10: no notes, so report it as a warning rather than lose it
+        warnings.warn(note, RuntimeWarning, stacklevel=4)
+    except Warning:  # warnings set to errors: log it, and keep the tool's own exception
+        logging.getLogger("agent_readback").warning(note)
+
+
+def _issue_keeping(error: BaseException, issue: Callable[..., Any], *args: Any) -> None:
+    """Issue the receipt for a call that raised, without letting a receipt failure replace its exception."""
+    try:
+        issue(*args)
+    except Exception as secondary:  # the tool's own exception is what the caller handles
+        _attach(error, f"readback: receipt step failed: {type(secondary).__name__}: {secondary}")
+
+
+class _Seen:
+    """The evidence log for one `receipted()` call: keeps each verdict before writing it on.
+
+    So a failed evidence-log write still leaves the verdict for the receipt. The
+    write error is held, not raised here, so it cannot replace the tool's own
+    exception; `receipted()` raises it once the receipt is issued.
+    """
+
+    def __init__(self, log: Any) -> None:
+        self.verdicts: list[Verdict] = []
+        self.log_error: Exception | None = None
+        self._log = log
+
+    def append(self, verdict: Verdict) -> Any:
+        self.verdicts.append(verdict)
+        if self._log is None:
+            return None
+        try:
+            return self._log.append(verdict)
+        except Exception as error:  # noqa: BLE001 - any write failure is held and re-raised by receipted()
+            self.log_error = error
+            return None
+
+
+def receipted(
+    fn: Callable[..., Any],
+    verifier: Verifier,
+    to_claim: ToClaim,
+    receipts: Any,
+    log: Any | None = None,
+    *,
+    said: Callable[[Any], str] = str,
+    outcome_id: Callable[..., "str | None"] | None = None,
+    on_verdict: Iterable[Callable[[Verdict], None]] = (),
+    on_receipt: Iterable[Callable[[Any], None]] = (),
+    **watch_options: Any,
+) -> Callable[..., Any]:
+    """Like `watched()`, but the call only succeeds once its receipt verifies.
+
+    After every checked call a receipt is issued and appended to `receipts` (a
+    `ReceiptLog`). Unless the receipt is `verified`, `OutcomeNotVerified` is
+    raised, so the agent never sees a success it can report as "done". In a
+    LangGraph `ToolNode` the error becomes the tool message the model reads; on
+    an MCP `ClientSession.call_tool` the caller gets the exception. If `fn`
+    itself raises, its receipt is still issued and its own exception propagates;
+    if issuing that receipt or writing the evidence log fails too, the failure
+    is added to it as a note. If writing the evidence log fails after a call
+    that did not raise, the receipt is still issued from the verdict and the
+    logging error propagates.
+
+    `outcome_id(*args, **kwargs)` may return an id to store on the receipt.
+
+        refund = receipted(issue_refund, verifier, to_claim, ReceiptLog("receipts.jsonl"), log=evidence)
+    """
+    from .receipts import issue_receipt, receipt_key  # receipts imports alerts; keep adapters import-light
+
+    receipt_key(receipts.key)  # fail at wrap time, not on the first refund
+    verdict_callbacks, receipt_callbacks = tuple(on_verdict), tuple(on_receipt)
+
+    def inner(seen: _Seen) -> Callable[..., Any]:
+        # A fresh wrapper per call: parallel calls (ToolNode threads) never share `seen`.
+        return watched(fn, verifier, to_claim, seen, said=said, on_verdict=verdict_callbacks, **watch_options)
+
+    def issue(seen: _Seen, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
+        if not seen.verdicts:
+            return None  # to_claim returned None: nothing was checked
+        oid = outcome_id(*args, **kwargs) if outcome_id is not None else None
+        receipt = issue_receipt(seen.verdicts[-1], receipts.key, outcome_id=oid, signing_key=receipts.signing_key)
+        receipts.append(receipt)
+        for callback in receipt_callbacks:
+            callback(receipt)
+        return receipt
+
+    def gate(receipt: Any) -> None:
+        if receipt is not None and not receipt.billable:
+            raise OutcomeNotVerified(receipt)
+
+    def finish(seen: _Seen, args: tuple[Any, ...], kwargs: dict[str, Any]) -> None:
+        if seen.log_error is not None:  # the call returned, but its evidence was not written
+            _issue_keeping(seen.log_error, issue, seen, args, kwargs)
+            raise seen.log_error
+        gate(issue(seen, args, kwargs))
+
+    if _is_async(fn):
+
+        @functools.wraps(fn)
+        async def run_async(*args: Any, **kwargs: Any) -> Any:
+            seen = _Seen(log)
+            try:
+                result = await inner(seen)(*args, **kwargs)
+            except BaseException as error:
+                if seen.log_error is not None:
+                    _attach(error, f"readback: evidence log write failed: {type(seen.log_error).__name__}: {seen.log_error}")
+                _issue_keeping(error, issue, seen, args, kwargs)
+                raise
+            finish(seen, args, kwargs)
+            return result
+
+        return run_async
+
+    @functools.wraps(fn)
+    def run(*args: Any, **kwargs: Any) -> Any:
+        seen = _Seen(log)
+        try:
+            result = inner(seen)(*args, **kwargs)
+        except BaseException as error:
+            if seen.log_error is not None:
+                _attach(error, f"readback: evidence log write failed: {type(seen.log_error).__name__}: {seen.log_error}")
+            _issue_keeping(error, issue, seen, args, kwargs)
+            raise
+        finish(seen, args, kwargs)
         return result
 
     return run

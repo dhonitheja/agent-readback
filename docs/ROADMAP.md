@@ -38,6 +38,9 @@ examples: run_eval harness, LangGraph agent, mock FHIR server, Stripe sandbox ru
 | 10 | ~~MCP over HTTP, not only in-memory and stdio~~ (done 2026-11-21: Streamable HTTP on 127.0.0.1, MCP 1.30 and 2.3; remote hosts with TLS or auth not tested) | adapters | Listed as untested | — |
 | 11 | ~~Cross-check `run_eval` and the LangGraph agent on the same seed and model~~ (done: labels aligned in 0.3.0; seed 7 task verdicts identical run for run for all three models) | examples | The two harnesses label outcomes slightly differently | 9 |
 | 12 | External security and compliance review (HIPAA) | all | None has been done; the target domain is healthcare | 1–8 |
+| 13 | Readback Receipts: signed outcome receipts, `reconcile` for Stripe and FHIR, `receipted()` runtime hook (built 2026-11-24 on `feature/readback-receipts`, not yet merged) | receipts | Outcome-priced agents bill for outcomes nobody checks | — |
+| 14 | ~~Ed25519 receipts so a vendor can issue and a buyer verify without sharing a key~~ (done 2026-11-25: optional `signatures` extra) | receipts | HMAC means anyone who can verify can also issue | 13 |
+| 15 | Reconcile Zendesk/Intercom resolutions and SQL rows | receipts | Only Stripe and FHIR are supported | 13 |
 
 Steps 1–3 are short and unblock the rest. Steps 4, 5 and 9 need credentials or
 infrastructure from the maintainer. Step 12 needs outside reviewers.

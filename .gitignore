@@ -12,3 +12,5 @@ graphify-out/
 .venv*/
 .claude-flow/
 .pytest-live-assessment*/
+*.key
+*.pem

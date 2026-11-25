@@ -10,12 +10,26 @@ import os
 import httpx
 
 from .core import Status, Verdict
+from .evidence import _RECEIPT_KEY_ENV, KEY_REGISTRY_LOCK, is_log_key, is_receipt_key
 from .evidence import KEY_ENV as LOG_KEY_ENV
-from .evidence import is_log_key
 
 # Separate from READBACK_LOG_KEY on purpose: the receiver needs this key to check
 # signatures, and must never hold the key that can rewrite the evidence log.
 ALERT_KEY_ENV = "READBACK_ALERT_KEY"
+
+# Fingerprints of the keys WebhookAlerts in this process sign with, so the
+# receipt key can refuse an alert key given only as key= (not in the env).
+_ALERT_KEY_FINGERPRINTS: set[str] = set()
+
+
+def _alert_fingerprint(key: bytes) -> str:
+    return hashlib.sha256(b"readback-alert-key:" + key).hexdigest()
+
+
+def is_alert_key(key: bytes) -> bool:
+    """True if `key` is READBACK_ALERT_KEY or a key a WebhookAlert in this process signs with."""
+    env = os.environ.get(ALERT_KEY_ENV, "").encode()
+    return bool(key) and ((bool(env) and hmac.compare_digest(key, env)) or _alert_fingerprint(key) in _ALERT_KEY_FINGERPRINTS)
 
 
 class WebhookAlert:
@@ -40,8 +54,13 @@ class WebhookAlert:
         self.client = client or httpx.Client(timeout=5.0)
         key = os.environ.get(ALERT_KEY_ENV) if key is None else key
         self.key = key.encode() if isinstance(key, str) else key or None
-        if self.key and is_log_key(self.key):
-            raise ValueError(f"the alert key must differ from {LOG_KEY_ENV}: the alert receiver must not hold the log key")
+        if self.key:
+            with KEY_REGISTRY_LOCK:
+                if is_log_key(self.key):
+                    raise ValueError(f"the alert key must differ from {LOG_KEY_ENV}: the alert receiver must not hold the log key")
+                if is_receipt_key(self.key):
+                    raise ValueError(f"the alert key must differ from {_RECEIPT_KEY_ENV}: the alert receiver must not be able to forge receipts")
+                _ALERT_KEY_FINGERPRINTS.add(_alert_fingerprint(self.key))
         self.last_error: Exception | None = None
 
     def __call__(self, verdict: Verdict) -> None:

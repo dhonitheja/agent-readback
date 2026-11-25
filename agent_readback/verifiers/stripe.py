@@ -25,7 +25,7 @@ import httpx
 from ..core import Claim, Finding, FindingKind, Status, Verdict, compare_fields
 
 CREATE = "stripe.refund.create"
-FIELDS = ("id", "amount", "currency", "status", "payment_intent", "charge")
+FIELDS = ("id", "amount", "currency", "status", "payment_intent", "charge", "created", "metadata")  # created: reconcile --since; metadata: --match-metadata
 MAX_PAGES = 50  # 5000 refunds on one payment intent; a server that pages forever gets `unverified`, not a hang
 
 

@@ -50,6 +50,11 @@ _HEX64 = re.compile(r"^[0-9a-f]{64}$")
 # keys used by other processes are not visible here.
 _LOG_KEY_FINGERPRINTS: set[str] = set()
 
+# Held while a log, receipt or alert key is checked against the other registries
+# and then registered, so two threads given the same key cannot both pass the
+# check before either registers it. Reentrant: a check may run under it.
+KEY_REGISTRY_LOCK = threading.RLock()
+
 
 def _fingerprint(key: bytes) -> str:
     return hashlib.sha256(b"readback-log-key:" + key).hexdigest()
@@ -59,6 +64,28 @@ def is_log_key(key: bytes) -> bool:
     """True if `key` is READBACK_LOG_KEY or a key an EvidenceLog in this process uses."""
     env = os.environ.get(KEY_ENV, "").encode()
     return bool(key) and ((bool(env) and hmac.compare_digest(key, env)) or _fingerprint(key) in _LOG_KEY_FINGERPRINTS)
+
+
+# Fingerprints of the receipt keys checked in this process, so an EvidenceLog or
+# WebhookAlert made after a receipt key is in use refuses that key too.
+_RECEIPT_KEY_FINGERPRINTS: set[str] = set()
+_RECEIPT_KEY_ENV = "READBACK_RECEIPT_KEY"  # receipts.RECEIPT_KEY_ENV; receipts imports this module
+
+
+def _receipt_fingerprint(key: bytes) -> str:
+    return hashlib.sha256(b"readback-receipt-key:" + key).hexdigest()
+
+
+def note_receipt_key(key: bytes) -> None:
+    """Record that `key` signs receipts in this process (called by receipts.receipt_key)."""
+    if key:
+        _RECEIPT_KEY_FINGERPRINTS.add(_receipt_fingerprint(key))
+
+
+def is_receipt_key(key: bytes) -> bool:
+    """True if `key` is READBACK_RECEIPT_KEY or a receipt key already used in this process."""
+    env = os.environ.get(_RECEIPT_KEY_ENV, "").encode()
+    return bool(key) and ((bool(env) and hmac.compare_digest(key, env)) or _receipt_fingerprint(key) in _RECEIPT_KEY_FINGERPRINTS)
 
 
 def _key_from(key: bytes | str | None) -> bytes | None:
@@ -132,7 +159,7 @@ def _owner_only(path: Path) -> None:
             )
             who = run("whoami.exe", "/user", "/fo", "csv", "/nh")
             sid = who.stdout.strip().rsplit(",", 1)[-1].strip('"') if who.returncode == 0 else ""
-            if not _SID.match(sid):
+            if not _SID.fullmatch(sid):
                 failed = f"could not read the current user's SID: {(who.stderr or who.stdout).strip()!r}"
             else:
                 # /reset drops explicit entries (some hosts, e.g. GitHub's Windows runners,
@@ -146,7 +173,7 @@ def _owner_only(path: Path) -> None:
     except (OSError, subprocess.SubprocessError, ValueError) as error:  # ValueError: e.g. UnicodeDecodeError
         failed = str(error)
     if failed:
-        warnings.warn(f"could not restrict {path} to the current user: {failed}", RuntimeWarning, stacklevel=5)
+        warnings.warn(f"could not restrict {path} to the current user: {failed}", RuntimeWarning, stacklevel=6)
 
 
 class FileAnchor:
@@ -177,12 +204,18 @@ class FileAnchor:
             count, head = data["count"], data["head"]
         except (ValueError, KeyError, TypeError) as error:
             raise ValueError(f"{self.path} is not a Readback anchor: {error}") from None
-        if type(count) is not int or count < 1 or not isinstance(head, str) or not _HEX64.match(head):
+        if type(count) is not int or count < 1 or not isinstance(head, str) or not _HEX64.fullmatch(head):
             raise ValueError(f"{self.path} is not a Readback anchor: bad count or head")
         return count, head
 
 
 class EvidenceLog:
+    _is_evidence_log = True  # False for ReceiptLog: its key is a receipt key, not a log key
+
+    @staticmethod
+    def _resolve_key(key: bytes | str | None) -> bytes | None:
+        return _key_from(key)
+
     def __init__(
         self, path: str | Path, keep_fields: Iterable[str] | str = (), key: bytes | str | None = None,
         anchor: Anchor | None = None,
@@ -192,9 +225,12 @@ class EvidenceLog:
         self.anchor_error: Exception | None = None
         self.keep_all = keep_fields == "*"
         self.keep = frozenset() if self.keep_all else frozenset(keep_fields)
-        self.key = _key_from(key)
-        if self.key:
-            _LOG_KEY_FINGERPRINTS.add(_fingerprint(self.key))
+        self.key = self._resolve_key(key)
+        if self.key and self._is_evidence_log:
+            with KEY_REGISTRY_LOCK:
+                if is_receipt_key(self.key):
+                    raise ValueError(f"the log key must differ from {_RECEIPT_KEY_ENV}: receipts leave the machine, the log key must not")
+                _LOG_KEY_FINGERPRINTS.add(_fingerprint(self.key))
         self._lock = threading.Lock()  # parallel tool calls (e.g. LangGraph ToolNode) share one log
         self._last = GENESIS
         self._count = 0
@@ -215,9 +251,14 @@ class EvidenceLog:
         body = verdict.to_dict()
         if not self.keep_all:
             body = redact(body, self.keep, self.key)
+        return self._write(body)
+
+    def _write(self, body: dict[str, Any]) -> str:
+        """Chain, write and anchor one record body. Call with `self._lock` held."""
         body = json.loads(json.dumps(body, default=str))  # store exactly what will be re-read
         seq = self._count
         record = {"seq": seq, "prev": self._last, "body": body, "hash": _digest(self._last, seq, body, self.key)}
+        record.update({k: v for k, v in self._record_extras(seq, body).items() if k not in record})
         if self.key is not None:
             # Informational, not hashed: lets a verifier without the key say "keyed log"
             # instead of "edited". A forger can delete it, so the CLI also flags every
@@ -238,14 +279,22 @@ class EvidenceLog:
             handle.write(json.dumps(record) + "\n")
         self._last = record["hash"]
         self._count += 1
+        self._wrote(record)
         if self.anchor is not None:
             try:
                 self.anchor(self._count, self._last)
                 self.anchor_error = None
             except Exception as error:  # never break the agent's flow; surface the gap instead
                 self.anchor_error = error
-                warnings.warn(f"evidence log anchor failed: {error}", RuntimeWarning, stacklevel=4)
+                warnings.warn(f"evidence log anchor failed: {error}", RuntimeWarning, stacklevel=5)
         return self._last
+
+    def _record_extras(self, seq: int, body: dict[str, Any]) -> dict[str, Any]:
+        """Fields a subclass adds to a record beside the hashed ones. Called with `self._lock` held."""
+        return {}
+
+    def _wrote(self, record: dict[str, Any]) -> None:
+        """Called after a record is written, with `self._lock` held."""
 
     def records(self) -> list[dict[str, Any]]:
         """All records in order. Raises ValueError on a line that is not a record."""
@@ -264,7 +313,7 @@ class EvidenceLog:
                 if not isinstance(record["body"], dict):
                     raise ValueError("body must be an object")
                 for name in ("hash", "prev"):  # compare_digest rejects non-ASCII strings with a TypeError
-                    if not isinstance(record[name], str) or not _HEX64.match(record[name]):
+                    if not isinstance(record[name], str) or not _HEX64.fullmatch(record[name]):
                         raise ValueError(f"{name} must be 64 lowercase hex characters")
             except ValueError as error:
                 raise ValueError(f"line {number + 1} of {self.path} is not an evidence record: {error}") from None

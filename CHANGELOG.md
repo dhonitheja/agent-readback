@@ -4,6 +4,49 @@ All notable changes to `agent-readback`. Dates are UTC.
 
 ## Unreleased
 
+### Added
+
+- Receipts: `issue_receipt`, `verify_receipt`, `Receipt`, `ReceiptVerdict`
+  (`verified`, `missing`, `contradicted`, `pending`, `unverifiable`) and
+  `ReceiptLog`, an HMAC-signed, hash-chained log of receipts. Receipts hold
+  keyed digests only, never identifiers or values. They need
+  `READBACK_RECEIPT_KEY` (32+ bytes, distinct from the log and alert keys).
+- `readback reconcile`: reads a vendor's outcome export (CSV or JSONL) back
+  against Stripe refunds or FHIR appointments and reports billed against
+  verified. One effect backs one outcome; `--prior` receipt logs catch
+  re-billing across periods (a missing `--prior` file stops the run);
+  `--since` ignores older refunds. A refund that has not settled is never
+  billable, even when the export claims its status, and one with no known
+  status is unverifiable. The same holds for receipts from `receipted()`:
+  a Stripe refund receipt is only `verified` once the refund `succeeded`. GET only, rate-limited,
+  credentials from the environment only.
+- `readback verify-receipts`, with `--anchor` / `--head`.
+- `receipted()` and `OutcomeNotVerified`: a tool wrapper that writes a receipt
+  and raises unless the outcome is verified, so an agent cannot report done on
+  an outcome the system does not show.
+- Optional Ed25519 receipts (`agent-readback[signatures]`): `signing_key=` on
+  `issue_receipt`, `ReceiptLog` and `reconcile`, `reconcile --signing-key`,
+  `verify-receipts --public-key` (no receipt key needed) and
+  `verify_signed_receipts()`. A public-key check refuses HMAC receipts,
+  including in a log opened with the receipt key (`ReceiptLog(...,
+  require_signed=True)`, which `verify-receipts --public-key` uses).
+- Log format 2: a `ReceiptLog` with a signing key signs each receipt's place
+  in the log, so `verify-receipts --public-key` catches a swapped, moved or
+  dropped receipt with no receipt key, and `--head` checks the issuer's
+  published public head (`ReceiptLog.place_head`, printed by `reconcile`).
+  Older logs need `--allow-v1` for a public-key check.
+- A receipt log bills each effect once (`AlreadyBilled`), even across
+  overlapping `reconcile()` runs that share it.
+- Receipts store a keyed `oid_...` stand-in for outcome ids by default
+  (`--keep-outcome-ids` to store them as given).
+- `reconcile --match-metadata KEY`: a Stripe refund only counts if its metadata
+  names the outcome.
+- `reconcile` only sends the Stripe key to `api.stripe.com` or localhost, and
+  prints which server it reads.
+- Stripe verifier reads the refund `created` time and `metadata`.
+- Requirements, STRIDE threat model, design and security review in
+  `docs/receipts/`.
+
 ### Fixed
 
 - `readback dashboard` on a phone: every table had a 520px minimum width, so
@@ -19,6 +62,13 @@ All notable changes to `agent-readback`. Dates are UTC.
   read (`unverified`). It used to pass the id check, become a snapshot key, and
   could return `verified` for an otherwise matching claim. FHIR already
   rejected such Appointment ids; both now have end-to-end regression tests.
+- FHIR: a claimed Appointment id is checked against the FHIR id format before
+  it goes into a URL. An id such as `1/../2` used to be resolved by httpx to a
+  different resource, read with the verifier's token (the field check still
+  stopped a false `verified`).
+- Pattern checks for SQL identifiers and placeholders, evidence hashes, anchor
+  heads and Windows SIDs match the whole string; `$` used to accept a
+  trailing newline.
 
 ## 0.3.1 — 2026-11-22
 

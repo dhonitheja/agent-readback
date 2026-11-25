@@ -43,10 +43,10 @@ jobs:
           python -m pip install --upgrade pip
           case "${{ matrix.deps }}" in
             minimal) python -m pip install -e ".[dev]" ;;                     # MCP and LangGraph tests skip
-            mcp1)    python -m pip install -e ".[dev,langgraph]" "mcp<2" ;;
-            mcp2)    python -m pip install -e ".[dev,langgraph]" "mcp>=2" ;;
+            mcp1)    python -m pip install -e ".[dev,langgraph,signatures]" "mcp<2" ;;
+            mcp2)    python -m pip install -e ".[dev,langgraph,signatures]" "mcp>=2" ;;
           esac
-          python -m pip list | grep -iE '^(mcp|langgraph|langchain-core|httpx) ' || true
+          python -m pip list | grep -iE '^(mcp|langgraph|langchain-core|httpx|cryptography) ' || true
 
       - name: Test
         run: python -m pytest -q -rs
@@ -64,11 +64,13 @@ jobs:
       - name: Install with every optional dependency
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -e ".[langgraph,security]" mcp
+          python -m pip install -e ".[langgraph,security,signatures]" mcp
       - name: Bandit (source code; fails on any unmarked finding)
         run: python -m bandit -r agent_readback examples -q
       - name: pip-audit (known vulnerabilities in installed dependencies)
         run: python -m pip_audit --skip-editable --progress-spinner off
+      - name: "detect-secrets (no keys or tokens in tracked files; fake fixtures carry an allowlist pragma)"
+        run: git ls-files -z | xargs -0 detect-secrets-hook
 
   build:
     runs-on: ubuntu-latest
