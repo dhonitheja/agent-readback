@@ -419,3 +419,24 @@ def test_cli_fhir(tmp_path, server, tools, monkeypatch, capsys):
                  "--receipts", str(tmp_path / "r.jsonl")]) == 0
     assert "fake-read-token" not in "".join(capsys.readouterr())
     assert main(["reconcile", str(path), "--system", "fhir", "--receipts", str(tmp_path / "r.jsonl")]) == 2  # no base URL
+
+
+def test_a_rerun_with_a_different_key_cannot_bill_an_effect_the_log_already_billed(tmp_path, monkeypatch):
+    """The attack: digest effects under key B so they miss the ones key A already billed."""
+    from agent_readback.receipts import ReceiptKeyError
+
+    stripe = Stripe()
+    stripe.refund("pi_A1", 2500)
+    path = csv_file(tmp_path, ["fin-1,stripe.refund.create,pi_A1,2500,usd"])
+    log = ReceiptLog(tmp_path / "receipts.jsonl", key=KEY)
+    first = run_stripe(stripe, path, receipts=log)
+    assert [r.billable for r in first] == [True]
+    other = "another-receipt-key-0123456789abcdef-not-real"
+    finder = StripeRefunds(StripeRefundVerifier(stripe.client()))
+    with pytest.raises(ReceiptKeyError, match="receipt log's key"):
+        reconcile(load_outcomes(path, system="stripe"), finder, other, receipts=log)
+    monkeypatch.setenv("READBACK_RECEIPT_KEY", other)  # with no key given, the log's own key wins over the env
+    again = reconcile(load_outcomes(path, system="stripe"), finder, receipts=log)
+    assert [r.billable for r in again] == [False]
+    assert sum(1 for body in log.receipts() if body["billable"]) == 1
+    assert log.verify() == []

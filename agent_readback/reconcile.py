@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import csv
 import errno
+import hmac
 import io
 import json
 import re
@@ -30,7 +31,8 @@ import httpx
 
 from .core import Claim, Finding, FindingKind, Status, Verdict, compare_fields
 from .receipts import (
-    AlreadyBilled, Receipt, ReceiptLog, ReceiptVerdict, _OUTCOME_ID, effect_digest, outcome_ref, receipt_key,
+    AlreadyBilled, Receipt, ReceiptKeyError, ReceiptLog, ReceiptVerdict, _OUTCOME_ID, effect_digest, outcome_ref,
+    receipt_key,
 )
 from .receipts import issue_receipt as _issue  # wrapped per outcome in _one
 from .verifiers.fhir import CANCEL as FHIR_CANCEL
@@ -357,8 +359,15 @@ def reconcile(
     Effects already billed in `receipts` count as `prior`, so a rerun into the
     same log cannot bill them twice. If another reconcile sharing that log
     bills an effect first, this run logs `already_billed` for it instead.
+    With `receipts`, `key` defaults to that log's key, and a different key is
+    refused: effects digested under another key would not match the ones the
+    log already billed, so the same effect could be billed again.
     """
+    if receipts is not None and key is None:
+        key = receipts.key
     secret = receipt_key(key)
+    if receipts is not None and not hmac.compare_digest(secret, receipts.key):
+        raise ReceiptKeyError("the reconcile key must be the receipt log's key, or the log's billed effects cannot be matched")
     if signing_key is None and receipts is not None:
         signing_key = receipts.signing_key
     if receipts is not None:
