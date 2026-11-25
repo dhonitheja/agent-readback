@@ -216,6 +216,68 @@ sql = SqlRowVerifier(limit_reads(connect, limit), "orders", "id")      # every c
 - A 429 the server still sends is a read error, so `unverified`. It is not
   retried.
 
+## Receipts: billed outcomes you can check
+
+Outcome-priced agents bill per "resolution" or "refund issued". A receipt
+records whether the system of record shows that outcome, signed so it can be
+shared and checked later. Only `verified` receipts are billable.
+
+| Verdict | Meaning |
+|---|---|
+| `verified` | The system shows the effect, and no other billed outcome claims it |
+| `missing` | Nothing matching the claim exists |
+| `contradicted` | Something exists but disagrees (wrong field, failed refund), or the effect already backs another outcome, or was billed in an earlier period |
+| `pending` | A matching refund the bank has not settled |
+| `unverifiable` | The system could not be read |
+
+A receipt holds no identifiers, amounts, times or agent text: only keyed
+digests of the claim, subject, observed state and effect, the read-back query
+template, the verdict and finding kinds. It is HMAC-SHA256 signed with
+`READBACK_RECEIPT_KEY` (at least 32 bytes, and never the evidence-log or alert
+key). There is no unkeyed mode.
+
+Reconcile a vendor's outcome export against Stripe:
+
+```bash
+export READBACK_RECEIPT_KEY=$(python -c "import secrets; print(secrets.token_hex(32))")
+export READBACK_STRIPE_KEY=rk_...          # restricted key with refunds: read; sk_ keys are refused
+readback reconcile november.csv --system stripe --since 2026-11-01 \
+    --receipts november-receipts.jsonl --prior october-receipts.jsonl
+readback verify-receipts november-receipts.jsonl
+```
+
+```
+5 billed, 1 verified (20.0%)
+  verified 1, missing 2, contradicted 1, pending 1, unverifiable 0
+Not verified:
+  fin-2  pending  (pending)
+  fin-3  contradicted  (wrong_value)
+  fin-4  missing  (missing)
+  fin-5  missing  (missing)
+```
+
+The CSV has `outcome_id`, `action` and the claim's fields (Stripe:
+`payment_intent`, `amount` in minor units, `currency`; FHIR: `patient`, and
+`id` for update and cancel). JSONL takes one `{"outcome_id", "action",
+"expected"}` object per line. `--system fhir` needs `--base-url` and reads an
+optional `READBACK_FHIR_TOKEN`. Secrets come only from the environment. Exit
+codes: 0 all verified, 1 some not, 2 usage or credentials, 3 bad input file.
+
+At runtime, `receipted()` wraps a tool like `watched()` but raises
+`OutcomeNotVerified` unless the receipt is verified, so the agent cannot
+report "done" on an outcome the system does not show. In a LangGraph
+`ToolNode` the model sees `outcome not verified: missing` as the tool result.
+
+```python
+from agent_readback import ReceiptLog, receipted
+
+receipts = ReceiptLog("receipts.jsonl")            # key from READBACK_RECEIPT_KEY
+refund = receipted(issue_refund, verifier, to_claim, receipts, log=evidence)
+```
+
+Requirements, the threat model and design decisions are in
+[`docs/receipts/`](docs/receipts/).
+
 ## Evidence log
 
 Every verdict is appended to a JSON-lines file in which each record carries
@@ -311,6 +373,13 @@ restricted key with `refunds: read`, a database role with `SELECT` only).
 | SQL injection via claim or config | Table and column names come from your code and are pattern-checked; the `placeholder` must be a DB-API paramstyle (`?`, `%s`, `:name`, `:1`, `$1`); values are always bound parameters |
 | Verifier overloading the system of record | Opt-in `limit_reads(..., RateLimit(...))` caps every read; it only delays reads, and with `max_wait` an over-long wait is `unverified`, never `failed` (see [Rate limiting the verifier's reads](#rate-limiting-the-verifiers-reads)) |
 | Unreadable system of record | `unverified`, never `verified` and never `failed` |
+| Receipt forged or edited | HMAC-SHA256 over every field with `READBACK_RECEIPT_KEY` and a domain prefix; `verify-receipts` checks the chain and each receipt, and a receipt cannot be upgraded to `verified` after the read |
+| One refund or booking billed twice, or again next month | Each effect backs at most one outcome per run; `--prior` receipt logs mark already-billed effects `contradicted`; `--since` ignores refunds from before the period |
+| Receipts leaking payment or health data | No identifiers, amounts, times or agent text; only keyed digests, finding kinds and field names. Errors keep only the exception type, since httpx messages quote URLs that hold ids |
+| Receipt key reused for the log or alerts | Refused if shorter than 32 bytes or equal to `READBACK_LOG_KEY`, `READBACK_ALERT_KEY` or any `EvidenceLog` key in the process |
+| Hostile outcome export | Size, row, column and cell caps; amounts must be whole numbers; outcome ids must start with a letter or digit (no spreadsheet formulas); errors name the line and field, never the value |
+| A claimed FHIR id that walks the URL path (`1/../2`) | Ids must be a valid FHIR id and not only dots, so a read never reaches another resource with the verifier's token |
+| Reconciliation writing to the system of record | Only GET requests; a Stripe `sk_` key is refused; credentials only from the environment; plain http only to localhost; reads rate-limited (default 20/s) |
 
 Notes:
 
@@ -344,8 +413,8 @@ external security or compliance review has been done.
 
 ## What is tested and what is not
 
-Version 0.3.1. The suite has 200 offline tests; with the optional test dependencies
-installed, 199 pass on Windows and the symlink test is skipped there without symlink privileges; elsewhere it runs too. A separate public HAPI FHIR R4 sandbox run verified 10 scripted
+Version 0.3.1 plus unreleased receipts. The suite has 319 offline tests; on Linux
+with the optional test dependencies, 314 pass and 5 Windows-only access tests skip. On Windows the symlink test is skipped without symlink privileges. A separate public HAPI FHIR R4 sandbox run verified 10 scripted
 operations (6 bookings, 1 reschedule, 3 cancellations); this is a
 compatibility smoke test, not production validation. A Stripe test-mode run
 produced the expected verdict for all four refund scenarios, using a separate
@@ -361,6 +430,7 @@ restricted key that was confirmed unable to create refunds.
 | MCP | MCP 1.30 and 2.3 `ClientSession` against in-memory FastMCP, a local stdio subprocess, and the same server over Streamable HTTP on 127.0.0.1, both backed by SQLite; over HTTP a booking the agent misdescribes is `failed` on the field read back from the database | MCP over HTTP to a remote host, with TLS or auth |
 | LangGraph | LangGraph 1.2 (CI on Linux and Windows; the `langgraph` extra requires 1.0+): a wrapped `StateGraph` node, a wrapped LangChain tool in `ToolNode`, and a full agent/`ToolNode` loop (`examples/healthcare/langgraph_agent.py`) that catches every false DONE under injected faults | LangGraph 0.x: the two adapter tests passed on 0.2 before 0.2.2, but 0.x is no longer tested and the agent loop needs 1.x |
 | Evidence log, redaction, report, dashboard, webhook | Unit tests, including HTML escaping of hostile context values and a BROKEN dashboard for a tampered log | Production load |
+| Receipts and reconciliation | Every verdict mapping, MAC tampering of each field, wrong and reused keys, no identifiers in receipts or reports, duplicate and already-billed effects, `--since`, hostile CSV and JSONL, GET-only reads, CLI exit codes; `receipted()` sync, async, in parallel and in a LangGraph `ToolNode` (mock Stripe and FHIR) | A real vendor export, live Stripe, a real EHR; public-key (Ed25519) receipts |
 
 No security or compliance review has been done.
 
@@ -423,12 +493,13 @@ requests fresh reads with `Cache-Control: no-cache`. After that change, all
 ### Project layout
 
 ```
-agent_readback/             core types, adapters, evidence log, rate limiting, report, dashboard, CLI
+agent_readback/             core types, adapters, evidence log, receipts, reconciliation, rate limiting, report, dashboard, CLI
 agent_readback/verifiers/   FHIR, Stripe, SQL
 examples/healthcare/        mock FHIR server, agent tools, model providers, evaluation runner, LangGraph agent
 examples/stripe_sandbox.py  Stripe test-mode validation runner
 tests/                      offline test suite
 docs/ROADMAP.md             planned work, by architecture layer
+docs/receipts/              receipts requirements, threat model, design, security review
 ```
 
 ## License

@@ -11,6 +11,7 @@ action and was not claimed is reported as an extra effect.
 
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 from typing import Any
 
@@ -22,6 +23,7 @@ CREATE = "fhir.appointment.create"
 UPDATE = "fhir.appointment.update"
 CANCEL = "fhir.appointment.cancel"
 MAX_PAGES = 20
+FHIR_ID = re.compile(r"^[A-Za-z0-9\-.]{1,64}$")  # FHIR R4 id datatype
 
 
 def normalize_instant(value: Any) -> Any:
@@ -140,6 +142,9 @@ class FhirAppointmentVerifier:
             raise ValueError(f"FHIR next link points off the server: {target.scheme}://{target.host}")
 
     def _one(self, appointment_id: str) -> dict[str, Any] | None:
+        # The id is spliced into the path: "1/../2" would read another resource with the verifier's token.
+        if not isinstance(appointment_id, str) or not FHIR_ID.fullmatch(appointment_id) or not appointment_id.strip("."):
+            raise ValueError("claimed Appointment id is not a valid FHIR id")
         response = self.client.get(f"Appointment/{appointment_id}", headers={"Cache-Control": "no-cache"})
         if response.status_code in (404, 410):
             return None

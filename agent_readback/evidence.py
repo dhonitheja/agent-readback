@@ -146,7 +146,7 @@ def _owner_only(path: Path) -> None:
     except (OSError, subprocess.SubprocessError, ValueError) as error:  # ValueError: e.g. UnicodeDecodeError
         failed = str(error)
     if failed:
-        warnings.warn(f"could not restrict {path} to the current user: {failed}", RuntimeWarning, stacklevel=5)
+        warnings.warn(f"could not restrict {path} to the current user: {failed}", RuntimeWarning, stacklevel=6)
 
 
 class FileAnchor:
@@ -183,6 +183,12 @@ class FileAnchor:
 
 
 class EvidenceLog:
+    _is_evidence_log = True  # False for ReceiptLog: its key is a receipt key, not a log key
+
+    @staticmethod
+    def _resolve_key(key: bytes | str | None) -> bytes | None:
+        return _key_from(key)
+
     def __init__(
         self, path: str | Path, keep_fields: Iterable[str] | str = (), key: bytes | str | None = None,
         anchor: Anchor | None = None,
@@ -192,8 +198,8 @@ class EvidenceLog:
         self.anchor_error: Exception | None = None
         self.keep_all = keep_fields == "*"
         self.keep = frozenset() if self.keep_all else frozenset(keep_fields)
-        self.key = _key_from(key)
-        if self.key:
+        self.key = self._resolve_key(key)
+        if self.key and self._is_evidence_log:
             _LOG_KEY_FINGERPRINTS.add(_fingerprint(self.key))
         self._lock = threading.Lock()  # parallel tool calls (e.g. LangGraph ToolNode) share one log
         self._last = GENESIS
@@ -215,6 +221,10 @@ class EvidenceLog:
         body = verdict.to_dict()
         if not self.keep_all:
             body = redact(body, self.keep, self.key)
+        return self._write(body)
+
+    def _write(self, body: dict[str, Any]) -> str:
+        """Chain, write and anchor one record body. Call with `self._lock` held."""
         body = json.loads(json.dumps(body, default=str))  # store exactly what will be re-read
         seq = self._count
         record = {"seq": seq, "prev": self._last, "body": body, "hash": _digest(self._last, seq, body, self.key)}
@@ -244,7 +254,7 @@ class EvidenceLog:
                 self.anchor_error = None
             except Exception as error:  # never break the agent's flow; surface the gap instead
                 self.anchor_error = error
-                warnings.warn(f"evidence log anchor failed: {error}", RuntimeWarning, stacklevel=4)
+                warnings.warn(f"evidence log anchor failed: {error}", RuntimeWarning, stacklevel=5)
         return self._last
 
     def records(self) -> list[dict[str, Any]]:

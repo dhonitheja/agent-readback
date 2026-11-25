@@ -30,6 +30,12 @@ from .core import Claim, Verdict, Verifier, Watch, _check, watch
 ToClaim = Callable[..., "Claim | None"]
 
 
+def _is_async(fn: Callable[..., Any]) -> bool:
+    # An object with `async def __call__` is not a coroutine function to inspect, but
+    # calling it returns a coroutine; treat it as async or the check runs before the write.
+    return inspect.iscoroutinefunction(fn) or inspect.iscoroutinefunction(getattr(fn, "__call__", None))
+
+
 def mcp_text(result: Any) -> str:
     """The text an MCP `CallToolResult` returned, used as the agent's claim message."""
     parts = [getattr(block, "text", None) for block in getattr(result, "content", None) or ()]
@@ -61,10 +67,8 @@ def watched(
     def final(probe: Claim, result: Any) -> Claim:
         return Claim(probe.action, said(result), probe.expected, probe.context)
 
-    # An object with `async def __call__` is not a coroutine function to inspect, but
-    # calling it returns a coroutine; treat it as async or the check runs before the write.
     # A plain sync function that returns an awaitable is not supported: wrap the async callee.
-    if inspect.iscoroutinefunction(fn) or inspect.iscoroutinefunction(getattr(fn, "__call__", None)):
+    if _is_async(fn):
 
         @functools.wraps(fn)
         async def run_async(*args: Any, **kwargs: Any) -> Any:
@@ -103,6 +107,97 @@ def watched(
         with watch(verifier, probe, log, on_verdict=callbacks, **watch_options) as w:
             result = fn(*args, **kwargs)
             w.claims(final(probe, result))
+        return result
+
+    return run
+
+
+class OutcomeNotVerified(RuntimeError):
+    """Raised by a `receipted()` call whose outcome did not verify. `.receipt` holds the receipt.
+
+    The message names the verdict and reason kinds only, never values, because
+    agent frameworks show it to the model and may log it.
+    """
+
+    def __init__(self, receipt: Any) -> None:
+        self.receipt = receipt
+        kinds = sorted({reason["kind"] for reason in receipt.reasons})
+        super().__init__(f"outcome not verified: {receipt.verdict}" + (f" ({', '.join(kinds)})" if kinds else ""))
+
+
+def receipted(
+    fn: Callable[..., Any],
+    verifier: Verifier,
+    to_claim: ToClaim,
+    receipts: Any,
+    log: Any | None = None,
+    *,
+    said: Callable[[Any], str] = str,
+    outcome_id: Callable[..., "str | None"] | None = None,
+    on_verdict: Iterable[Callable[[Verdict], None]] = (),
+    on_receipt: Iterable[Callable[[Any], None]] = (),
+    **watch_options: Any,
+) -> Callable[..., Any]:
+    """Like `watched()`, but the call only succeeds once its receipt verifies.
+
+    After every checked call a receipt is issued and appended to `receipts` (a
+    `ReceiptLog`). Unless the receipt is `verified`, `OutcomeNotVerified` is
+    raised, so the agent never sees a success it can report as "done". In a
+    LangGraph `ToolNode` the error becomes the tool message the model reads; on
+    an MCP `ClientSession.call_tool` the caller gets the exception. If `fn`
+    itself raises, its receipt is still issued and its own exception propagates.
+
+    `outcome_id(*args, **kwargs)` may return an id to store on the receipt.
+
+        refund = receipted(issue_refund, verifier, to_claim, ReceiptLog("receipts.jsonl"), log=evidence)
+    """
+    from .receipts import issue_receipt, receipt_key  # receipts imports alerts; keep adapters import-light
+
+    receipt_key(receipts.key)  # fail at wrap time, not on the first refund
+    verdict_callbacks, receipt_callbacks = tuple(on_verdict), tuple(on_receipt)
+
+    def inner(seen: list[Verdict]) -> Callable[..., Any]:
+        # A fresh wrapper per call: parallel calls (ToolNode threads) never share `seen`.
+        return watched(fn, verifier, to_claim, log, said=said, on_verdict=(*verdict_callbacks, seen.append), **watch_options)
+
+    def issue(seen: list[Verdict], args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
+        if not seen:
+            return None  # to_claim returned None: nothing was checked
+        oid = outcome_id(*args, **kwargs) if outcome_id is not None else None
+        receipt = issue_receipt(seen[-1], receipts.key, outcome_id=oid)
+        receipts.append(receipt)
+        for callback in receipt_callbacks:
+            callback(receipt)
+        return receipt
+
+    def gate(receipt: Any) -> None:
+        if receipt is not None and not receipt.billable:
+            raise OutcomeNotVerified(receipt)
+
+    if _is_async(fn):
+
+        @functools.wraps(fn)
+        async def run_async(*args: Any, **kwargs: Any) -> Any:
+            seen: list[Verdict] = []
+            try:
+                result = await inner(seen)(*args, **kwargs)
+            except BaseException:
+                issue(seen, args, kwargs)
+                raise
+            gate(issue(seen, args, kwargs))
+            return result
+
+        return run_async
+
+    @functools.wraps(fn)
+    def run(*args: Any, **kwargs: Any) -> Any:
+        seen: list[Verdict] = []
+        try:
+            result = inner(seen)(*args, **kwargs)
+        except BaseException:
+            issue(seen, args, kwargs)
+            raise
+        gate(issue(seen, args, kwargs))
         return result
 
     return run

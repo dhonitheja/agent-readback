@@ -69,6 +69,8 @@ jobs:
         run: python -m bandit -r agent_readback examples -q
       - name: pip-audit (known vulnerabilities in installed dependencies)
         run: python -m pip_audit --skip-editable --progress-spinner off
+      - name: detect-secrets (no keys or tokens in tracked files; mark fake fixtures with "pragma: allowlist secret")
+        run: git ls-files -z | xargs -0 detect-secrets-hook
 
   build:
     runs-on: ubuntu-latest

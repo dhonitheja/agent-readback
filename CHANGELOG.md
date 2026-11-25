@@ -4,6 +4,26 @@ All notable changes to `agent-readback`. Dates are UTC.
 
 ## Unreleased
 
+### Added
+
+- Receipts: `issue_receipt`, `verify_receipt`, `Receipt`, `ReceiptVerdict`
+  (`verified`, `missing`, `contradicted`, `pending`, `unverifiable`) and
+  `ReceiptLog`, an HMAC-signed, hash-chained log of receipts. Receipts hold
+  keyed digests only, never identifiers or values. They need
+  `READBACK_RECEIPT_KEY` (32+ bytes, distinct from the log and alert keys).
+- `readback reconcile`: reads a vendor's outcome export (CSV or JSONL) back
+  against Stripe refunds or FHIR appointments and reports billed against
+  verified. One effect backs one outcome; `--prior` receipt logs catch
+  re-billing across periods; `--since` ignores older refunds. GET only,
+  rate-limited, credentials from the environment only.
+- `readback verify-receipts`, with `--anchor` / `--head`.
+- `receipted()` and `OutcomeNotVerified`: a tool wrapper that writes a receipt
+  and raises unless the outcome is verified, so an agent cannot report done on
+  an outcome the system does not show.
+- Stripe verifier reads the refund `created` time.
+- Requirements, STRIDE threat model, design and security review in
+  `docs/receipts/`.
+
 ### Fixed
 
 - `readback dashboard` on a phone: every table had a 520px minimum width, so
@@ -19,6 +39,10 @@ All notable changes to `agent-readback`. Dates are UTC.
   read (`unverified`). It used to pass the id check, become a snapshot key, and
   could return `verified` for an otherwise matching claim. FHIR already
   rejected such Appointment ids; both now have end-to-end regression tests.
+- FHIR: a claimed Appointment id is checked against the FHIR id format before
+  it goes into a URL. An id such as `1/../2` used to be resolved by httpx to a
+  different resource, read with the verifier's token (the field check still
+  stopped a false `verified`).
 
 ## 0.3.1 — 2026-11-22
 
