@@ -119,6 +119,21 @@ the model sees "outcome not verified: missing" instead of a success.
   keys the digests and the log chain. `verify-receipts --public-key` checks
   signatures and record links with no secret, and refuses HMAC receipts.
 
+### ADR-R7: Log format 2 signs each receipt's place in the log
+- **Context**: a public-key check proved each receipt genuine but could not
+  recompute the keyed chain, so a swapped, moved or dropped receipt passed.
+- **Decision**: a `ReceiptLog` with a signing key adds `place` to each record:
+  `{"format": 2, "link", "sig"}`, where `link` is SHA-256 of
+  `readback-place-v2:` + canonical `{seq, prev (the previous place link, or 64
+  zeros), body (SHA-256 of the canonical body)}` and `sig` is the Ed25519
+  signature of the same bytes. The receipt body format (version 1) is
+  unchanged, and `place` sits outside the keyed hash, which still covers the
+  body.
+- **Consequences**: the newest `link` is a public head the issuer can publish.
+  Format 1 records fail a public-key check unless `--allow-v1`; a format 1
+  record after a format 2 one always fails. An older log can be continued in
+  format 2, and a format 2 log is never continued without the signing key.
+
 ### ADR-R3: A separate receipt key, required, at least 32 bytes
 - **Context**: receipts are meant to be shared; the evidence-log key must
   never leave the log writer (the existing rule for alerts).

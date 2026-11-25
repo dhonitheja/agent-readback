@@ -269,7 +269,11 @@ def test_cli_signs_and_a_buyer_checks_with_the_public_key_only(tmp_path, stripe_
     capsys.readouterr()
     assert main(["verify-receipts", str(receipts), "--public-key", str(public_path)]) == 0
     assert "every signature verifies" in capsys.readouterr().out
-    assert main(["verify-receipts", str(receipts), "--public-key", str(public_path), "--head", "0" * 64]) == 2
+    assert main(["verify-receipts", str(receipts), "--public-key", str(public_path), "--head", "0" * 64]) == 1
+    head = ReceiptLog.public_head_of(receipts)
+    assert main(["verify-receipts", str(receipts), "--public-key", str(public_path), "--head", head]) == 0
+    assert main(["verify-receipts", str(receipts), "--public-key", str(public_path),
+                 "--anchor", str(tmp_path / "anchor.json")]) == 2  # a FileAnchor head is keyed
     receipts.write_text(receipts.read_text().replace('"verified"', '"missing"', 1))
     assert main(["verify-receipts", str(receipts), "--public-key", str(public_path)]) == 1
 
@@ -546,3 +550,108 @@ def test_overlapping_reconciles_sharing_a_receipt_log_bill_an_effect_once(tmp_pa
     assert late.verdict == "contradicted" and "already_billed" in [r["kind"] for r in late.reasons]
     rows = ReceiptLog(shared.path, key=KEY).receipts()
     assert [r["billable"] for r in rows] == [True, False]
+
+
+# -- Log format 2: each receipt's place in the log is signed ------------------------------
+
+def _signed_log(tmp_path, count=3, name="r.jsonl"):
+    private, private_path, public_path = keypair(tmp_path)
+    log = ReceiptLog(tmp_path / name, key=KEY, signing_key=private)
+    for n in range(count):
+        log.append(issue_receipt(verdict(), KEY, signing_key=private, effect=f"stripe:refund:re_{n}"))
+    return log, private, log.path.read_text().splitlines()
+
+
+def _write(tmp_path, name, lines):
+    path = tmp_path / name
+    path.write_text("".join(line + "\n" for line in lines))
+    return path
+
+
+def test_a_public_check_catches_a_body_swapped_for_another_genuine_receipt(tmp_path):
+    log, private, lines = _signed_log(tmp_path)
+    # Keep record 1's seq, prev and hash, but give it another genuine signed receipt's body.
+    record = json.loads(lines[1])
+    record["body"] = json.loads(lines[2])["body"]
+    assert verify_receipt(record["body"], public_key=private.public_key()) is None  # the body alone still verifies
+    swapped = _write(tmp_path, "swapped.jsonl", [lines[0], json.dumps(record), lines[2]])
+    count, problems = verify_signed_receipts(swapped, private.public_key())
+    assert count == 3 and any("record 1: its place in the log does not verify" in p for p in problems)
+    assert verify_signed_receipts(log.path, private.public_key()) == (3, [])
+
+
+def test_a_public_check_catches_a_dropped_receipt_with_rewritten_links(tmp_path):
+    log, private, lines = _signed_log(tmp_path)
+    second, third = json.loads(lines[1]), json.loads(lines[2])
+    third["seq"], third["prev"] = 1, second["prev"]  # relink record 2 to stand where record 1 was
+    dropped = _write(tmp_path, "dropped.jsonl", [lines[0], json.dumps(third)])
+    problems = verify_signed_receipts(dropped, private.public_key())[1]
+    assert any("record 1: its place in the log does not verify" in p for p in problems)
+
+
+def test_a_public_head_catches_dropped_newest_receipts(tmp_path):
+    log, private, lines = _signed_log(tmp_path)
+    head = log.place_head
+    assert verify_signed_receipts(log.path, private.public_key(), head=head) == (3, [])
+    truncated = _write(tmp_path, "truncated.jsonl", lines[:2])
+    assert verify_signed_receipts(truncated, private.public_key())[1] == []  # without the head, a clean prefix
+    problems = verify_signed_receipts(truncated, private.public_key(), head=head)[1]
+    assert problems == ["the given head is not in the log: receipts were dropped or rewritten"]
+
+
+def test_stripping_the_place_signature_is_not_an_older_log(tmp_path):
+    log, private, lines = _signed_log(tmp_path)
+    stripped = json.loads(lines[2])
+    stripped.pop("place")
+    path = _write(tmp_path, "stripped.jsonl", [lines[0], lines[1], json.dumps(stripped)])
+    problems = verify_signed_receipts(path, private.public_key(), allow_v1=True)[1]
+    assert any("not signed, after records whose place is" in p for p in problems)
+
+
+def test_format_1_receipts_need_the_allow_v1_flag(tmp_path, monkeypatch, capsys):
+    private, _, public_path = keypair(tmp_path)
+    old = ReceiptLog(tmp_path / "old.jsonl", key=KEY)  # format 1: signed receipts, no signing key on the log
+    old.path.write_text("")
+    for n in range(2):
+        receipt = issue_receipt(verdict(), KEY, signing_key=private, effect=f"stripe:refund:re_{n}")
+        old._write(receipt.to_dict())
+    assert "place" not in old.path.read_text()
+    problems = verify_signed_receipts(old.path, private.public_key())[1]
+    assert len(problems) == 2 and all("log format 1" in p and "--allow-v1" in p for p in problems)
+    assert verify_signed_receipts(old.path, private.public_key(), allow_v1=True) == (2, [])
+    assert main(["verify-receipts", str(old.path), "--public-key", str(public_path)]) == 1
+    assert main(["verify-receipts", str(old.path), "--public-key", str(public_path), "--allow-v1"]) == 0
+    monkeypatch.setenv(RECEIPT_KEY_ENV, KEY)  # the keyed chain covers place, but the public-key check still asks
+    assert main(["verify-receipts", str(old.path), "--public-key", str(public_path)]) == 1
+    assert main(["verify-receipts", str(old.path), "--public-key", str(public_path), "--allow-v1"]) == 0
+
+
+def test_an_older_log_continues_in_format_2_and_still_verifies(tmp_path):
+    private, _, _ = keypair(tmp_path)
+    path = tmp_path / "r.jsonl"
+    ReceiptLog(path, key=KEY).append(issue_receipt(verdict(), KEY, effect="stripe:refund:re_0"))  # format 1, HMAC
+    log = ReceiptLog(path, key=KEY, signing_key=private)
+    log.append(issue_receipt(verdict(), KEY, signing_key=private, effect="stripe:refund:re_1"))
+    log.append(issue_receipt(verdict(), KEY, signing_key=private, effect="stripe:refund:re_2"))
+    assert ReceiptLog(path, key=KEY, signing_key=private).verify() == []
+    rows = [json.loads(line) for line in path.read_text().splitlines()]
+    assert ["place" in row for row in rows] == [False, True, True]
+
+
+def test_a_format_2_log_is_never_continued_without_the_signing_key(tmp_path):
+    log, private, _ = _signed_log(tmp_path)
+    before = log.path.read_bytes()
+    with pytest.raises(ValueError, match="open it with signing_key="):
+        ReceiptLog(log.path, key=KEY, public_key=private.public_key()).append(
+            issue_receipt(verdict(), KEY, signing_key=private, effect="stripe:refund:re_9"))
+    assert log.path.read_bytes() == before
+
+
+def test_a_receipt_log_that_does_not_verify_is_a_file_error_in_reconcile(tmp_path, stripe_cli, capsys):
+    other = "another-receipt-key-0123456789abcdef-test"
+    receipts = tmp_path / "r.jsonl"
+    ReceiptLog(receipts, key=other).append(issue_receipt(verdict(), other))
+    stripe_cli.refund("pi_A1", 1)
+    path = csv_file(tmp_path, ["fin-1,stripe.refund.create,pi_A1,1,usd"])
+    assert main(["reconcile", str(path), "--system", "stripe", "--receipts", str(receipts)]) == 3
+    assert "does not verify" in capsys.readouterr().err

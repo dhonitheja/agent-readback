@@ -30,6 +30,13 @@ All notable changes to `agent-readback`. Dates are UTC.
   `verify_signed_receipts()`. A public-key check refuses HMAC receipts,
   including in a log opened with the receipt key (`ReceiptLog(...,
   require_signed=True)`, which `verify-receipts --public-key` uses).
+- Log format 2: a `ReceiptLog` with a signing key signs each receipt's place
+  in the log, so `verify-receipts --public-key` catches a swapped, moved or
+  dropped receipt with no receipt key, and `--head` checks the issuer's
+  published public head (`ReceiptLog.place_head`, printed by `reconcile`).
+  Older logs need `--allow-v1` for a public-key check.
+- A receipt log bills each effect once (`AlreadyBilled`), even across
+  overlapping `reconcile()` runs that share it.
 - Receipts store a keyed `oid_...` stand-in for outcome ids by default
   (`--keep-outcome-ids` to store them as given).
 - `reconcile --match-metadata KEY`: a Stripe refund only counts if its metadata

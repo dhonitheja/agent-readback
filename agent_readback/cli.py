@@ -75,9 +75,12 @@ def main(argv: list[str] | None = None) -> int:
     ver.add_argument("path")
     anchored = ver.add_mutually_exclusive_group()
     anchored.add_argument("--anchor", metavar="FILE", help="fail unless the log still holds the head recorded by FileAnchor")
-    anchored.add_argument("--head", metavar="HASH", help="fail unless the log still holds this head hash")
+    anchored.add_argument("--head", metavar="HASH",
+                          help="fail unless the log still holds this head hash (with --public-key and no receipt key: the issuer's public head)")
     ver.add_argument("--public-key", metavar="FILE",
-                     help=f"check Ed25519 signatures with the issuer's public key; without {RECEIPT_KEY_ENV} only signatures and links are checked")
+                     help=f"check Ed25519 signatures with the issuer's public key; without {RECEIPT_KEY_ENV}, signatures and each receipt's signed place are checked")
+    ver.add_argument("--allow-v1", action="store_true",
+                     help="with --public-key: accept older receipts (log format 1) whose place in the log is not signed")
     args = parser.parse_args(argv)
 
     if args.command == "reconcile":
@@ -260,11 +263,20 @@ def reconcile_main(args: argparse.Namespace) -> int:
         else:
             finder = FhirAppointments(FhirAppointmentVerifier(client))
         labels: dict[str, str] = {}
-        made = reconcile(outcomes, finder, receipts.key, prior=prior, receipts=receipts,
-                         keep_outcome_ids=args.keep_outcome_ids, labels=labels)
+        try:
+            made = reconcile(outcomes, finder, receipts.key, prior=prior, receipts=receipts,
+                             keep_outcome_ids=args.keep_outcome_ids, labels=labels)
+        except ValueError as error:  # the receipt log does not verify, or refused a receipt
+            print(f"ERROR: {error} ({receipts.path.name} now holds {len(receipts.records())} receipt(s))", file=sys.stderr)
+            return FILE_ERROR
+        except OSError as error:
+            print(f"ERROR: cannot write the receipt log: {error.strerror or error}", file=sys.stderr)
+            return FILE_ERROR
     summary = summarise_reconciliation(made, labels)
     print(json.dumps(summary, indent=2) if args.json else render_reconciliation(summary))
     print(f"{len(made)} receipt(s) appended to {args.receipts}; head: {receipts.head}", file=sys.stderr)
+    if receipts.place_head:
+        print(f"public head (publish it with the log for buyers who check with your public key): {receipts.place_head}", file=sys.stderr)
     return OK if summary["verified"] == summary["billed"] else BROKEN
 
 
@@ -284,11 +296,12 @@ def verify_receipts_main(args: argparse.Namespace) -> int:
             print(f"ERROR: cannot use public key {args.public_key}: {getattr(error, 'strerror', None) or error}", file=sys.stderr)
             return FILE_ERROR
         if not os.environ.get(RECEIPT_KEY_ENV):
-            if args.anchor or args.head:
-                print("ERROR: --anchor and --head need the receipt key; without it only signatures are checked", file=sys.stderr)
+            if args.anchor:
+                print("ERROR: --anchor needs the receipt key; without it, pass the issuer's public head with --head", file=sys.stderr)
                 return USAGE
             try:
-                count, problems = verify_signed_receipts(path, public_key)
+                count, problems = verify_signed_receipts(path, public_key, allow_v1=args.allow_v1, head=args.head)
+                public_head = ReceiptLog.public_head_of(path)
             except (OSError, UnicodeDecodeError) as error:
                 print(f"ERROR: cannot read {args.path}: {error}", file=sys.stderr)
                 return FILE_ERROR
@@ -296,11 +309,14 @@ def verify_receipts_main(args: argparse.Namespace) -> int:
                 print(f"BROKEN: {problem}")
             if problems:
                 return BROKEN
-            print(f"OK: {count} receipts, every signature verifies and the records link up")
-            print("note: without the receipt key the keyed chain is not recomputed; use the issuer's anchor to catch dropped receipts")
+            print(f"OK: {count} receipts, every signature verifies and each signed receipt is where the issuer wrote it")
+            if public_head:
+                print(f"public head: {public_head}")
+            if not args.head:
+                print("note: to catch dropped newest receipts, compare the public head with the one the issuer published (--head)")
             return OK
     try:
-        log = ReceiptLog(path, public_key=public_key, require_signed=public_key is not None)
+        log = ReceiptLog(path, public_key=public_key, require_signed=public_key is not None, allow_v1=args.allow_v1)
         problems = log.verify()
         records = log.records()
     except ReceiptKeyError as error:
@@ -333,6 +349,8 @@ def verify_receipts_main(args: argparse.Namespace) -> int:
             return BROKEN
     print(f"OK: {len(records)} receipts, chain intact, every receipt verifies")
     print(f"head: {log.head}")
+    if log.place_head:
+        print(f"public head: {log.place_head}")
     return OK
 
 

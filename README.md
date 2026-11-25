@@ -252,9 +252,19 @@ readback reconcile november.csv --system stripe --receipts r.jsonl --signing-key
 readback verify-receipts r.jsonl --public-key issuer.pub.pem   # no receipt key needed
 ```
 
-The public-key check proves every receipt is yours and unedited. It cannot
-prove the log is complete: a receipt swapped for another of your genuine
-receipts, or records dropped, are only caught with the receipt key.
+The public-key check proves every receipt is yours and unedited, and that
+each sits where you wrote it: a log written with `--signing-key` also signs
+each receipt's place in the log (log format 2), so a swapped, moved or
+dropped receipt fails. To catch dropped newest receipts, publish the
+`public head` that `reconcile` prints, and the buyer checks it:
+
+```bash
+readback verify-receipts r.jsonl --public-key issuer.pub.pem --head PUBLIC_HEAD
+```
+
+Logs written before format 2 carry no place signatures; the public-key check
+refuses them unless you pass `--allow-v1`, and for those receipts only the
+receipt key catches a swap or a drop.
 
 Reconcile a vendor's outcome export against Stripe:
 

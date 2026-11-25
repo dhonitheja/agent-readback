@@ -228,6 +228,7 @@ class EvidenceLog:
         body = json.loads(json.dumps(body, default=str))  # store exactly what will be re-read
         seq = self._count
         record = {"seq": seq, "prev": self._last, "body": body, "hash": _digest(self._last, seq, body, self.key)}
+        record.update({k: v for k, v in self._record_extras(seq, body).items() if k not in record})
         if self.key is not None:
             # Informational, not hashed: lets a verifier without the key say "keyed log"
             # instead of "edited". A forger can delete it, so the CLI also flags every
@@ -248,6 +249,7 @@ class EvidenceLog:
             handle.write(json.dumps(record) + "\n")
         self._last = record["hash"]
         self._count += 1
+        self._wrote(record)
         if self.anchor is not None:
             try:
                 self.anchor(self._count, self._last)
@@ -256,6 +258,13 @@ class EvidenceLog:
                 self.anchor_error = error
                 warnings.warn(f"evidence log anchor failed: {error}", RuntimeWarning, stacklevel=5)
         return self._last
+
+    def _record_extras(self, seq: int, body: dict[str, Any]) -> dict[str, Any]:
+        """Fields a subclass adds to a record beside the hashed ones. Called with `self._lock` held."""
+        return {}
+
+    def _wrote(self, record: dict[str, Any]) -> None:
+        """Called after a record is written, with `self._lock` held."""
 
     def records(self) -> list[dict[str, Any]]:
         """All records in order. Raises ValueError on a line that is not a record."""

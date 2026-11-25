@@ -15,6 +15,9 @@ For receipts that someone else must be able to check without being able to
 make them, sign with Ed25519 as well (`signing_key=`, optional extra
 `agent-readback[signatures]`): the receipt then carries `mac_alg: ed25519`
 and verifies with the public key alone. The HMAC key still keys the digests.
+A `ReceiptLog` with a signing key also signs each receipt's place in the log
+(log format 2), so a public-key check catches a receipt that was swapped,
+moved or dropped, and a published head catches dropped newest receipts.
 
     receipts = ReceiptLog("receipts.jsonl")         # key from READBACK_RECEIPT_KEY
     receipt = issue_receipt(verdict, receipts.key, outcome_id="fin-00412")
@@ -47,6 +50,11 @@ MAC_ALG = "hmac-sha256"
 SIG_ALG = "ed25519"
 MIN_KEY_BYTES = 32
 _MAC_DOMAIN = b"readback-receipt-v1:"
+LOG_FORMAT = 2  # a record whose place in the log is signed; format 1 records carry no `place`
+_PLACE_DOMAIN = b"readback-place-v2:"
+PLACE_GENESIS = "0" * 64
+_HEX64 = re.compile(r"^[0-9a-f]{64}$")
+_HEX128 = re.compile(r"^[0-9a-f]{128}$")
 _OUTCOME_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")  # first character never a spreadsheet formula
 _ACTION = re.compile(r"^[a-z0-9_]+(\.[a-z0-9_]+){1,4}$")
 _RECEIPT_ID = re.compile(r"^rcpt_[0-9a-f]{32}$")
@@ -249,6 +257,54 @@ def _signature_ok(public_key: Any, unsigned: dict[str, Any], signature: str) -> 
     return True
 
 
+def _place_message(seq: int, prev_link: str, body: dict[str, Any]) -> bytes:
+    # The body's digest, its position and the place before it: moving, swapping
+    # or dropping a record breaks the signature on it or on the one after.
+    return _PLACE_DOMAIN + canonical({"seq": seq, "prev": prev_link, "body": hashlib.sha256(canonical(body)).hexdigest()})
+
+
+def _place(signing_key: Any, seq: int, prev_link: str, body: dict[str, Any]) -> dict[str, Any]:
+    message = _place_message(seq, prev_link, body)
+    return {"format": LOG_FORMAT, "link": hashlib.sha256(message).hexdigest(), "sig": signing_key.sign(message).hex()}
+
+
+def check_places(records: list[dict[str, Any]], public_key: Any, *, allow_v1: bool = False) -> tuple[list[str], str]:
+    """Check each record's signed place in the log. Returns (problems, newest place link).
+
+    Format 1 records (no `place`) are problems unless `allow_v1`; a format 1
+    record after a format 2 one is always a problem, since stripping the
+    signature must not pass for an older log.
+    """
+    from cryptography.exceptions import InvalidSignature
+
+    problems: list[str] = []
+    prev, signed = PLACE_GENESIS, False
+    for number, record in enumerate(records):
+        place = record.get("place") if isinstance(record, dict) else None
+        if place is None:
+            if signed:
+                problems.append(f"record {number}: its place in the log is not signed, after records whose place is")
+            elif not allow_v1:
+                problems.append(f"record {number}: log format 1, its place in the log is not signed (allow older receipts with --allow-v1)")
+            continue
+        signed = True
+        body = record.get("body")
+        if (not isinstance(place, dict) or place.get("format") != LOG_FORMAT or not isinstance(body, dict)
+                or not isinstance(place.get("link"), str) or not _HEX64.fullmatch(place["link"])
+                or not isinstance(place.get("sig"), str) or not _HEX128.fullmatch(place["sig"])):
+            problems.append(f"record {number}: unreadable place signature")
+            continue
+        message = _place_message(number, prev, body)
+        try:
+            if not hmac.compare_digest(hashlib.sha256(message).hexdigest(), place["link"]):
+                raise InvalidSignature()
+            public_key.verify(bytes.fromhex(place["sig"]), message)
+        except InvalidSignature:
+            problems.append(f"record {number}: its place in the log does not verify: moved, swapped, or a record before it was dropped")
+        prev = place["link"]
+    return problems, prev
+
+
 def issue_receipt(
     verdict: Verdict,
     key: bytes | str | None = None,
@@ -386,7 +442,9 @@ class ReceiptLog(EvidenceLog):
 
     `require_signed=True` (with `public_key=`) refuses every receipt that is
     not Ed25519-signed, so a log made with only the shared HMAC key cannot
-    pass a check against the issuer's public key.
+    pass a check against the issuer's public key. With a signing key every
+    record also gets a signed `place` (log format 2); `allow_v1=True` accepts
+    older records without one when `require_signed` is set.
 
     An effect is billed at most once per log: appending a second verified
     receipt for an effect the log already holds as verified raises
@@ -403,7 +461,8 @@ class ReceiptLog(EvidenceLog):
         return receipt_key(key)
 
     def __init__(self, path: str | Path, key: bytes | str | None = None, anchor: Any = None, *,
-                 signing_key: Any = None, public_key: Any = None, require_signed: bool = False) -> None:
+                 signing_key: Any = None, public_key: Any = None, require_signed: bool = False,
+                 allow_v1: bool = False) -> None:
         if Path(path).is_symlink():
             raise ValueError(f"{path} is a symbolic link; give the receipt log's real path")
         super().__init__(path, key=key, anchor=anchor)
@@ -412,11 +471,41 @@ class ReceiptLog(EvidenceLog):
         if require_signed and self.public_key is None:
             raise ValueError("require_signed needs public_key= or signing_key=")
         self.require_signed = require_signed
+        self.allow_v1 = allow_v1
         self._contents_checked = False
+        self._place_link, self._placed = PLACE_GENESIS, False
         self._billed: set[str] = set()  # verified effect digests, loaded with the first content check
         for number, record in enumerate(self.records()):
             if record["body"].get("receipt_version") is None:
                 raise ValueError(f"{self.path} is not a receipt log (record {number} is not a receipt)")
+            if isinstance(record.get("place"), dict) and isinstance(record["place"].get("link"), str):
+                self._place_link, self._placed = record["place"]["link"], True
+
+    @staticmethod
+    def public_head_of(path: str | Path) -> str | None:
+        """Newest signed place link in a receipt log, read without any key. None for a format 1 log."""
+        head = None
+        with open(path, encoding="utf-8") as handle:
+            for line in handle:
+                try:
+                    place = json.loads(line).get("place")
+                except (ValueError, AttributeError):
+                    continue
+                if isinstance(place, dict) and isinstance(place.get("link"), str):
+                    head = place["link"]
+        return head
+
+    @property
+    def place_head(self) -> str | None:
+        """Newest signed place link (log format 2). Publish it with the count so a buyer can catch dropped receipts."""
+        return self._place_link if self._placed else None
+
+    def _record_extras(self, seq: int, body: dict[str, Any]) -> dict[str, Any]:
+        return {} if self.signing_key is None else {"place": _place(self.signing_key, seq, self._place_link, body)}
+
+    def _wrote(self, record: dict[str, Any]) -> None:
+        if "place" in record:
+            self._place_link, self._placed = record["place"]["link"], True
 
     def append(self, receipt: Receipt) -> str:  # type: ignore[override]
         if not isinstance(receipt, Receipt):
@@ -425,6 +514,8 @@ class ReceiptLog(EvidenceLog):
         if problem:
             raise ValueError(f"refusing to log a receipt that does not verify with this log's key: {problem}")
         with self._lock:
+            if self._placed and self.signing_key is None:
+                raise ValueError(f"{self.path.name} signs each receipt's place in the log: open it with signing_key=")
             if not self._contents_checked:
                 # Opened with another key, or tampered with: appending would
                 # extend a chain that no single key can verify.
@@ -462,34 +553,42 @@ class ReceiptLog(EvidenceLog):
         intact, bad = self.verify_chain()
         if not intact:
             problems.append(f"chain broken at record {bad} (line {bad + 1})")
-        for number, body in enumerate(self.receipts()):
-            problem = self._check(body)
+        records = self.records()
+        for number, record in enumerate(records):
+            problem = self._check(record["body"])
             if problem:
                 problems.append(f"record {number}: {problem}")
+        if self.public_key is not None:
+            # Format 1 records are fine where the keyed chain is the check, unless only signatures may vouch.
+            place_problems, _ = check_places(records, self.public_key, allow_v1=self.allow_v1 or not self.require_signed)
+            problems += place_problems
         return problems
 
 
-def verify_signed_receipts(path: str | Path, public_key: Any) -> tuple[int, list[str]]:
+def verify_signed_receipts(path: str | Path, public_key: Any, *, allow_v1: bool = False,
+                           head: str | None = None) -> tuple[int, list[str]]:
     """Check a receipt log you did not write, with the issuer's Ed25519 public key only.
 
-    Proves each receipt came from the issuer and was not edited, and that the
-    seq and prev fields still link up. It cannot recompute the keyed chain, so
-    it does not catch a body swapped for another genuine signed receipt, a
-    dropped record whose links were rewritten, or dropped newest records.
-    Those checks need the receipt key (verify-receipts with --anchor or --head).
+    Proves each receipt came from the issuer and was not edited, and, for log
+    format 2, that each sits where the issuer wrote it: a swapped, moved or
+    dropped receipt fails. Dropped newest receipts need `head`, the place link
+    the issuer published (`ReceiptLog.place_head`). Format 1 records, whose
+    place is not signed, fail unless `allow_v1`; for those only the receipt
+    key (verify-receipts with --anchor or --head) catches swaps and drops.
     Returns (number of receipts, problems).
     """
     problems: list[str] = []
     previous = "0" * 64
-    count = 0
+    records: list[dict[str, Any]] = []
     with open(path, encoding="utf-8") as handle:
         for number, line in enumerate(handle):
             try:
                 record = json.loads(line)
             except ValueError:
                 problems.append(f"record {number}: not JSON")
+                records.append({})
                 continue
-            count += 1
+            records.append(record if isinstance(record, dict) else {})
             if not isinstance(record, dict) or record.get("seq") != number or record.get("prev") != previous:
                 problems.append(f"record {number}: out of order or not linked to the record before")
             body = record.get("body") if isinstance(record, dict) else None
@@ -497,4 +596,11 @@ def verify_signed_receipts(path: str | Path, public_key: Any) -> tuple[int, list
             if problem:
                 problems.append(f"record {number}: {problem}")
             previous = record.get("hash") if isinstance(record, dict) else None
-    return count, problems
+    place_problems, _ = check_places(records, public_key, allow_v1=allow_v1)
+    problems += place_problems
+    if head is not None:
+        wanted = head.strip().lower()
+        links = [r.get("place", {}).get("link") if isinstance(r.get("place"), dict) else None for r in records]
+        if wanted not in links:
+            problems.append("the given head is not in the log: receipts were dropped or rewritten")
+    return len(records), problems

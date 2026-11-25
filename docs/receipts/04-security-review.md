@@ -47,6 +47,10 @@ know of has a defence and a test, and that what is left is written down.
 | F9 | Medium (PR review) | A matching refund with no `status`, or a status Stripe does not document, was billed as `verified` | Fixed: only the documented statuses are read; any other gives `unverifiable`. `test_a_refund_with_no_known_status_is_unverifiable_not_billable` |
 | F10 | High (PR review) | `receipted()` billed a refund that was still pending or had no status, because the verifier judges whether the claim is true and a claim of "pending" can be true | Fixed in `issue_receipt`, so every path gets it: a Stripe refund receipt is only `verified` when every refund it saw is `succeeded`; otherwise `pending` or `unverifiable`, with a `not_settled` reason. `test_receipted_only_bills_a_settled_refund` |
 | F11 | Low (PR review) | A refund `status` that was a list or object raised `TypeError` and stopped reconciliation part way | Fixed: a status that is not text is `unverifiable`. `test_a_refund_status_that_is_not_text_is_unverifiable_not_a_crash` |
+| F12 | Major (PR review) | `receipted()` collected the verdict through a callback that ran after the evidence-log write, so a failed write left no receipt | Fixed: the verdict is kept before the evidence log is written; the receipt is still issued and the logging error propagates. `test_a_failed_evidence_log_write_still_leaves_a_receipt` (sync and async) |
+| F13 | Major (PR review) | Two `reconcile()` runs sharing one `ReceiptLog` could both read history before either wrote, and both bill one effect | Fixed: `ReceiptLog.append` refuses a second verified receipt for an effect (`AlreadyBilled`) under the write lock; `reconcile()` then logs `already_billed`. `test_overlapping_reconciles_sharing_a_receipt_log_bill_an_effect_once` |
+| F14 | Low (PR review) | A receipt log that failed verification during `reconcile` ended in a traceback and exit 1, which reads as "unverified outcomes" | Fixed: exit 3, file error. `test_a_receipt_log_that_does_not_verify_is_a_file_error_in_reconcile` |
+| F15 | High (design, user's call) | A public-key-only check could not catch a swapped, moved or dropped receipt | Fixed with log format 2 (signed place per record, published public head). `test_a_public_check_catches_a_body_swapped_for_another_genuine_receipt`, `test_a_public_check_catches_a_dropped_receipt_with_rewritten_links`, `test_a_public_head_catches_dropped_newest_receipts`, `test_stripping_the_place_signature_is_not_an_older_log`, `test_format_1_receipts_need_the_allow_v1_flag` |
 | F8 | Low (CI) | Two leak tests searched the whole receipt text, which holds random hex and microsecond timestamps, so a value like `2500` could appear by chance and fail the run | Fixed: the leak checks blank the random-by-design fields first (`leak_text` in `tests/conftest.py`) |
 
 ## Residual risks from the first review, and what became of each
@@ -67,21 +71,23 @@ know of has a defence and a test, and that what is left is written down.
   who can make receipts. Keep them in a secrets manager or an owner-only file,
   never in the repo, and rotate them if a machine is lost. Publish only the
   public key.
-- **Completeness for a public verifier (open).** With only the public key, a
-  buyer can prove each receipt is a genuine, unedited issuer receipt and that
-  the `seq` and `prev` fields link, but cannot recompute the keyed chain. So
-  a public-only check does not catch a record whose body was swapped for
-  another genuine signed receipt, a dropped record whose links were rewritten,
-  or dropped newest records. `--anchor` and `--head` need the receipt key, so
-  they do not help a public-only verifier. A full fix binds each signature to
-  its chain position (sign the sequence number and the previous hash too);
-  that changes the receipt format and is left for a later version.
-- **Folder access.** Keep receipt and evidence logs in a folder only the
-  writer can change.
+- **Completeness for a public verifier (fixed in log format 2).** A
+  `ReceiptLog` with a signing key signs each record's place: its `seq`, the
+  previous record's place link and a digest of its body. With only the public
+  key, a buyer now catches a body swapped for another genuine signed receipt,
+  a moved record, and a dropped record whose links were rewritten. Dropped
+  newest records are caught when the issuer publishes the `public head` and
+  the buyer passes it with `--head`; without it, a clean prefix of the log
+  still passes. Stripping a place signature after signed records always
+  fails. Format 1 logs (no place signatures) fail a public-key check unless
+  `--allow-v1` is given, and for those records the receipt key is still the
+  only check on swaps and drops.
 - **One writing process per receipt log.** A receipt log bills each effect at
   most once, checked under its lock at the moment of writing, so overlapping
   `reconcile()` calls or `receipted()` tools that share one `ReceiptLog` in a
   process cannot both bill the same refund or appointment. The lock is per
   process: two separate processes writing the same file are not covered.
+- **Folder access.** Keep receipt and evidence logs in a folder only the
+  writer can change.
 - No build can promise that a breach is impossible. These are the threats we
   know of, each with a defence and a test.
