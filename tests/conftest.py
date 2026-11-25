@@ -45,10 +45,10 @@ def leak_text(receipts, extra: str = "") -> str:
 @pytest.fixture(autouse=True)
 def _forget_alert_keys():
     """WebhookAlert and receipt_key remember their keys for the whole process; each test starts clean."""
-    from agent_readback import alerts
+    from agent_readback import alerts, evidence
 
     alerts._ALERT_KEY_FINGERPRINTS.clear()
-    alerts._RECEIPT_KEY_FINGERPRINTS.clear()
+    evidence._RECEIPT_KEY_FINGERPRINTS.clear()
     yield
     alerts._ALERT_KEY_FINGERPRINTS.clear()
-    alerts._RECEIPT_KEY_FINGERPRINTS.clear()
+    evidence._RECEIPT_KEY_FINGERPRINTS.clear()

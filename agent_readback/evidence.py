@@ -61,6 +61,28 @@ def is_log_key(key: bytes) -> bool:
     return bool(key) and ((bool(env) and hmac.compare_digest(key, env)) or _fingerprint(key) in _LOG_KEY_FINGERPRINTS)
 
 
+# Fingerprints of the receipt keys checked in this process, so an EvidenceLog or
+# WebhookAlert made after a receipt key is in use refuses that key too.
+_RECEIPT_KEY_FINGERPRINTS: set[str] = set()
+_RECEIPT_KEY_ENV = "READBACK_RECEIPT_KEY"  # receipts.RECEIPT_KEY_ENV; receipts imports this module
+
+
+def _receipt_fingerprint(key: bytes) -> str:
+    return hashlib.sha256(b"readback-receipt-key:" + key).hexdigest()
+
+
+def note_receipt_key(key: bytes) -> None:
+    """Record that `key` signs receipts in this process (called by receipts.receipt_key)."""
+    if key:
+        _RECEIPT_KEY_FINGERPRINTS.add(_receipt_fingerprint(key))
+
+
+def is_receipt_key(key: bytes) -> bool:
+    """True if `key` is READBACK_RECEIPT_KEY or a receipt key already used in this process."""
+    env = os.environ.get(_RECEIPT_KEY_ENV, "").encode()
+    return bool(key) and ((bool(env) and hmac.compare_digest(key, env)) or _receipt_fingerprint(key) in _RECEIPT_KEY_FINGERPRINTS)
+
+
 def _key_from(key: bytes | str | None) -> bytes | None:
     if key is None:
         key = os.environ.get(KEY_ENV)
@@ -199,6 +221,8 @@ class EvidenceLog:
         self.keep_all = keep_fields == "*"
         self.keep = frozenset() if self.keep_all else frozenset(keep_fields)
         self.key = self._resolve_key(key)
+        if self.key and self._is_evidence_log and is_receipt_key(self.key):
+            raise ValueError(f"the log key must differ from {_RECEIPT_KEY_ENV}: receipts leave the machine, the log key must not")
         if self.key and self._is_evidence_log:
             _LOG_KEY_FINGERPRINTS.add(_fingerprint(self.key))
         self._lock = threading.Lock()  # parallel tool calls (e.g. LangGraph ToolNode) share one log

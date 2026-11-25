@@ -458,6 +458,15 @@ def test_a_receipt_key_already_in_use_is_refused_as_an_alert_key():
     WebhookAlert("https://alerts.test/hook", key="a-distinct-alert-key-0123456789abcdef")  # a distinct key is fine
 
 
+def test_a_receipt_key_already_in_use_is_refused_as_an_evidence_log_key(tmp_path):
+    from agent_readback import EvidenceLog
+
+    ReceiptLog(tmp_path / "r.jsonl", key=KEY)  # the receipt key is in use first
+    with pytest.raises(ValueError, match="READBACK_RECEIPT_KEY"):
+        EvidenceLog(tmp_path / "e.jsonl", key=KEY)
+    EvidenceLog(tmp_path / "e.jsonl", key="a-distinct-log-key-0123456789abcdef-test")  # a distinct key is fine
+
+
 def test_a_receipt_failure_is_a_warning_where_exceptions_take_no_notes():
     from agent_readback.adapters import _issue_keeping
 

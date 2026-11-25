@@ -10,8 +10,8 @@ import os
 import httpx
 
 from .core import Status, Verdict
+from .evidence import _RECEIPT_KEY_ENV, is_log_key, is_receipt_key
 from .evidence import KEY_ENV as LOG_KEY_ENV
-from .evidence import is_log_key
 
 # Separate from READBACK_LOG_KEY on purpose: the receiver needs this key to check
 # signatures, and must never hold the key that can rewrite the evidence log.
@@ -24,28 +24,6 @@ _ALERT_KEY_FINGERPRINTS: set[str] = set()
 
 def _alert_fingerprint(key: bytes) -> str:
     return hashlib.sha256(b"readback-alert-key:" + key).hexdigest()
-
-
-# Fingerprints of the receipt keys checked in this process, so a WebhookAlert
-# made after a receipt key is in use refuses that key too.
-_RECEIPT_KEY_FINGERPRINTS: set[str] = set()
-_RECEIPT_KEY_ENV = "READBACK_RECEIPT_KEY"  # receipts.RECEIPT_KEY_ENV; receipts imports this module
-
-
-def _receipt_fingerprint(key: bytes) -> str:
-    return hashlib.sha256(b"readback-receipt-key:" + key).hexdigest()
-
-
-def note_receipt_key(key: bytes) -> None:
-    """Record that `key` signs receipts in this process (called by receipts.receipt_key)."""
-    if key:
-        _RECEIPT_KEY_FINGERPRINTS.add(_receipt_fingerprint(key))
-
-
-def is_receipt_key(key: bytes) -> bool:
-    """True if `key` is READBACK_RECEIPT_KEY or a receipt key already used in this process."""
-    env = os.environ.get(_RECEIPT_KEY_ENV, "").encode()
-    return bool(key) and ((bool(env) and hmac.compare_digest(key, env)) or _receipt_fingerprint(key) in _RECEIPT_KEY_FINGERPRINTS)
 
 
 def is_alert_key(key: bytes) -> bool:

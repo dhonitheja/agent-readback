@@ -39,10 +39,10 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
-from .alerts import ALERT_KEY_ENV, is_alert_key, note_receipt_key
+from .alerts import ALERT_KEY_ENV, is_alert_key
 from .core import FindingKind, Status, Verdict
 from .evidence import KEY_ENV as LOG_KEY_ENV
-from .evidence import EvidenceLog, is_log_key
+from .evidence import EvidenceLog, is_log_key, note_receipt_key
 
 RECEIPT_KEY_ENV = "READBACK_RECEIPT_KEY"
 RECEIPT_VERSION = 1
