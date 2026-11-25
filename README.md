@@ -220,7 +220,9 @@ sql = SqlRowVerifier(limit_reads(connect, limit), "orders", "id")      # every c
 
 Outcome-priced agents bill per "resolution" or "refund issued". A receipt
 records whether the system of record shows that outcome, signed so it can be
-shared and checked later. Only `verified` receipts are billable.
+shared and checked later. Only `verified` receipts are billable, and a Stripe
+refund only verifies once Stripe shows it `succeeded`: a pending refund is
+`pending` even when the claim said "pending".
 
 | Verdict | Meaning |
 |---|---|
@@ -435,8 +437,8 @@ external security or compliance review has been done.
 
 ## What is tested and what is not
 
-Version 0.3.1 plus unreleased receipts. The suite has 347 offline tests; on Linux
-with the optional test dependencies, 342 pass and 5 Windows-only access tests skip. On Windows the symlink test is skipped without symlink privileges. A separate public HAPI FHIR R4 sandbox run verified 10 scripted
+Version 0.3.1 plus unreleased receipts. The suite has 353 offline tests; on Linux
+with the optional test dependencies, 348 pass and 5 Windows-only access tests skip. On Windows the symlink test is skipped without symlink privileges. A separate public HAPI FHIR R4 sandbox run verified 10 scripted
 operations (6 bookings, 1 reschedule, 3 cancellations); this is a
 compatibility smoke test, not production validation. A Stripe test-mode run
 produced the expected verdict for all four refund scenarios, using a separate

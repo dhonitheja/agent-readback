@@ -89,6 +89,31 @@ class ReceiptVerdict(str, Enum):
         return cls.PENDING if FindingKind.PENDING in kinds else cls.UNVERIFIABLE
 
 
+_STRIPE_REFUND = "stripe.refund.create"
+_UNSETTLED = frozenset({"pending", "requires_action"})
+
+
+def _unsettled(verdict: Verdict) -> "ReceiptVerdict | None":
+    """For a Stripe refund, the receipt verdict when the money has not settled; None when it has.
+
+    A verifier judges whether the claim is true, so a claim of "pending" can
+    verify. Billing needs more: only a refund Stripe shows as succeeded is
+    billable, whichever path (reconcile or receipted()) issues the receipt.
+    """
+    if verdict.claim.action != _STRIPE_REFUND:
+        return None
+    observed = verdict.observed if isinstance(verdict.observed, dict) else {}
+    items = [observed["matched"]] if "matched" in observed else observed.get("created")
+    if not isinstance(items, list) or not items or not all(isinstance(item, dict) for item in items):
+        return ReceiptVerdict.UNVERIFIABLE
+    statuses = [item.get("status") for item in items]
+    if all(status == "succeeded" for status in statuses):
+        return None
+    if any(isinstance(status, str) and status in _UNSETTLED for status in statuses):
+        return ReceiptVerdict.PENDING
+    return ReceiptVerdict.UNVERIFIABLE
+
+
 class ReceiptKeyError(ValueError):
     """The receipt key is missing, too short, or also used for something else."""
 
@@ -256,6 +281,11 @@ def issue_receipt(
         raise ValueError("a receipt can only be verified when the read-back verified it")
     reasons = [{"kind": finding.kind.value, "field": finding.field} for finding in verdict.findings]
     reasons += [{"kind": kind, "field": None} for kind in extra_reasons]
+    if status is ReceiptVerdict.VERIFIED:
+        unsettled = _unsettled(verdict)
+        if unsettled is not None:
+            status = unsettled
+            reasons.append({"kind": "not_settled", "field": "status"})
     if effect is None:
         effect = effect_of(verdict)
     subject = _subject(claim.action, claim.expected, subject_fields)

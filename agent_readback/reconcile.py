@@ -267,7 +267,7 @@ class StripeRefunds:
                 continue
             effect = f"stripe:refund:{refund_id}"
             status = item.get("status")
-            if status not in _REFUND_STATUSES:
+            if not isinstance(status, str) or status not in _REFUND_STATUSES:
                 # Settlement cannot be told from a missing or unknown status.
                 return _Found(error="refund without a known status")
             if "status" in claim.expected and status != claim.expected["status"]:

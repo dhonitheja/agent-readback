@@ -55,7 +55,7 @@ def refund_verdict(action=lambda s: s.refund("pi_SECRET42", 2500)):
     (Status.UNVERIFIED, [], ReceiptVerdict.UNVERIFIABLE),
 ])
 def test_every_readback_verdict_maps_to_one_receipt_verdict(status, kinds, expected):
-    verdict = Verdict(status, REFUND, tuple(Finding(kind, "x") for kind in kinds))
+    verdict = Verdict(status, REFUND, tuple(Finding(kind, "x") for kind in kinds), {"created": [{"id": "re_1", "status": "succeeded"}]})
     receipt = issue_receipt(verdict, KEY)
     assert receipt.verdict == expected.value
     assert receipt.billable is (expected is ReceiptVerdict.VERIFIED)  # pending is never billable

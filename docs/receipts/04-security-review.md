@@ -11,7 +11,7 @@ know of has a defence and a test, and that what is left is written down.
 
 | Check | Tool and scope | Result |
 |---|---|---|
-| Tests | `pytest`, full suite, run twice | 347 tests: 342 pass, 5 Windows-only ACL tests skip on Linux. 141 are new (62 receipts, 51 reconciliation and CLI, 28 for the fixes below) |
+| Tests | `pytest`, full suite, run twice | 353 tests: 348 pass, 5 Windows-only ACL tests skip on Linux. 147 are new (62 receipts, 51 reconciliation and CLI, 34 for the fixes below) |
 | Static analysis | `bandit 1.9.4 -r agent_readback examples` (the CI gate) | Clean. One new low finding (B105 on the environment variable *name* `READBACK_FHIR_TOKEN`) is a false positive, marked `# nosec B105` with the reason |
 | Static analysis, wider | `ruff` rules F, E9, B, S on the changed files | Nothing new to fix. `zip()` in the CSV parser now uses `strict=True`. The other hits are the same B105 name, the existing `icacls` call in `evidence.py` (fixed argument list, no shell) and an existing `__call__` check moved unchanged into `_is_async` |
 | Dependency audit | `pip-audit 2.10.1 --skip-editable`, with `cryptography` installed | No known vulnerabilities. No new runtime dependency: httpx is still the only one; `cryptography` is only in the optional `signatures` extra |
@@ -45,6 +45,8 @@ know of has a defence and a test, and that what is left is written down.
 | F6 | High (PR review) | `verify-receipts --public-key` with the receipt key set fell back to HMAC for HMAC receipts, so a log forged with only the shared key passed against the issuer's public key | Fixed: `ReceiptLog(require_signed=True)` refuses every unsigned receipt, and the CLI uses it. `test_a_public_key_check_refuses_a_log_made_with_only_the_shared_key` |
 | F7 | Medium (PR review) | A misspelt or missing `--prior` path read as an empty history, so already billed effects could be billed again | Fixed: a missing or non-file prior log stops the run (exit 3) before any read. `test_a_missing_prior_log_stops_reconciliation` |
 | F9 | Medium (PR review) | A matching refund with no `status`, or a status Stripe does not document, was billed as `verified` | Fixed: only the documented statuses are read; any other gives `unverifiable`. `test_a_refund_with_no_known_status_is_unverifiable_not_billable` |
+| F10 | High (PR review) | `receipted()` billed a refund that was still pending or had no status, because the verifier judges whether the claim is true and a claim of "pending" can be true | Fixed in `issue_receipt`, so every path gets it: a Stripe refund receipt is only `verified` when every refund it saw is `succeeded`; otherwise `pending` or `unverifiable`, with a `not_settled` reason. `test_receipted_only_bills_a_settled_refund` |
+| F11 | Low (PR review) | A refund `status` that was a list or object raised `TypeError` and stopped reconciliation part way | Fixed: a status that is not text is `unverifiable`. `test_a_refund_status_that_is_not_text_is_unverifiable_not_a_crash` |
 | F8 | Low (CI) | Two leak tests searched the whole receipt text, which holds random hex and microsecond timestamps, so a value like `2500` could appear by chance and fail the run | Fixed: the leak checks blank the random-by-design fields first (`leak_text` in `tests/conftest.py`) |
 
 ## Residual risks from the first review, and what became of each

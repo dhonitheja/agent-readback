@@ -10,7 +10,7 @@ import sqlite3
 import httpx
 import pytest
 
-from agent_readback import FileAnchor, ReceiptLog, issue_receipt, receipted, verify_receipt, verify_signed_receipts
+from agent_readback import FileAnchor, OutcomeNotVerified, ReceiptLog, issue_receipt, receipted, verify_receipt, verify_signed_receipts
 from agent_readback import cli
 from agent_readback.cli import main
 from agent_readback.core import Claim, Status, Verdict
@@ -43,7 +43,7 @@ def keypair(tmp_path, name="issuer"):
 
 def verdict(status=Status.VERIFIED):
     claim = Claim("stripe.refund.create", "", {"payment_intent": "pi_A1", "amount": 2500, "currency": "usd"})
-    return Verdict(status, claim, (), {"created": [{"id": "re_1"}]})
+    return Verdict(status, claim, (), {"created": [{"id": "re_1", "status": "succeeded"}]})
 
 
 # -- F3: anchors match the whole string ------------------------------------------------
@@ -345,3 +345,39 @@ def test_a_refund_with_no_known_status_is_unverifiable_not_billable(tmp_path, st
     path = csv_file(tmp_path, ["fin-1,stripe.refund.create,pi_A1,2500,usd"])
     receipts = run_stripe(stripe, path)
     assert [r.verdict for r in receipts] == ["unverifiable"] and summarise(receipts)["verified"] == 0
+
+
+@pytest.mark.parametrize("status", [["pending"], {"a": 1}])
+def test_a_refund_status_that_is_not_text_is_unverifiable_not_a_crash(tmp_path, status):
+    stripe = Stripe()
+    stripe.refund("pi_A1", 2500)
+    stripe.refunds[-1]["status"] = status
+    receipts = run_stripe(stripe, csv_file(tmp_path, ["fin-1,stripe.refund.create,pi_A1,2500,usd"]))
+    assert [r.verdict for r in receipts] == ["unverifiable"]
+
+
+@pytest.mark.parametrize("claimed, actual, expected", [
+    ({"status": "pending"}, "pending", "pending"),          # the claim is true, but nothing has settled
+    ({}, "requires_action", "pending"),
+    ({}, None, "unverifiable"),
+    ({}, "succeeded", "verified"),
+])
+def test_receipted_only_bills_a_settled_refund(tmp_path, claimed, actual, expected):
+    stripe = Stripe()
+    log = ReceiptLog(tmp_path / "r.jsonl", key=KEY)
+
+    def issue_refund(amount):
+        stripe.refund("pi_A1", amount, status=actual or "succeeded")
+        if actual is None:
+            stripe.refunds[-1].pop("status")
+        return "ok"
+
+    to_claim = lambda amount: Claim("stripe.refund.create", "", {"payment_intent": "pi_A1", "amount": amount, **claimed})  # noqa: E731
+    refund = receipted(issue_refund, StripeRefundVerifier(stripe.client()), to_claim, log)
+    if expected == "verified":
+        assert refund(2500) == "ok"
+    else:
+        with pytest.raises(OutcomeNotVerified):
+            refund(2500)
+    (receipt,) = log.receipts()
+    assert receipt["verdict"] == expected and receipt["billable"] is (expected == "verified")
