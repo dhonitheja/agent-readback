@@ -30,7 +30,7 @@ import httpx
 
 from .core import Claim, Finding, FindingKind, Status, Verdict, compare_fields
 from .receipts import (
-    Receipt, ReceiptLog, ReceiptVerdict, _OUTCOME_ID, effect_digest, outcome_ref, receipt_key,
+    AlreadyBilled, Receipt, ReceiptLog, ReceiptVerdict, _OUTCOME_ID, effect_digest, outcome_ref, receipt_key,
 )
 from .receipts import issue_receipt as _issue  # wrapped per outcome in _one
 from .verifiers.fhir import CANCEL as FHIR_CANCEL
@@ -355,7 +355,8 @@ def reconcile(
     Pass a `labels` dict to get receipt_id -> original outcome id for your own report.
     Signs with `signing_key`, else the receipt log's signing key, if either is set.
     Effects already billed in `receipts` count as `prior`, so a rerun into the
-    same log cannot bill them twice.
+    same log cannot bill them twice. If another reconcile sharing that log
+    bills an effect first, this run logs `already_billed` for it instead.
     """
     secret = receipt_key(key)
     if signing_key is None and receipts is not None:
@@ -369,10 +370,16 @@ def reconcile(
     for outcome in outcomes:
         ref = outcome.outcome_id if keep_outcome_ids else outcome_ref(secret, outcome.outcome_id)
         receipt = _one(outcome, ref, finder, secret, used, seen_ids, prior, signing_key)
+        if receipts is not None:
+            try:
+                receipts.append(receipt)
+            except AlreadyBilled:
+                # An overlapping run billed this effect after our history was read.
+                receipt = _issue(Verdict(Status.FAILED, outcome.claim), secret, outcome_id=ref, signing_key=signing_key,
+                                 override=ReceiptVerdict.CONTRADICTED, extra_reasons=["already_billed"])
+                receipts.append(receipt)
         if labels is not None:
             labels[receipt.receipt_id] = outcome.outcome_id
-        if receipts is not None:
-            receipts.append(receipt)
         out.append(receipt)
     return out
 

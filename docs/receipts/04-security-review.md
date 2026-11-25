@@ -78,5 +78,10 @@ know of has a defence and a test, and that what is left is written down.
   that changes the receipt format and is left for a later version.
 - **Folder access.** Keep receipt and evidence logs in a folder only the
   writer can change.
+- **One writing process per receipt log.** A receipt log bills each effect at
+  most once, checked under its lock at the moment of writing, so overlapping
+  `reconcile()` calls or `receipted()` tools that share one `ReceiptLog` in a
+  process cannot both bill the same refund or appointment. The lock is per
+  process: two separate processes writing the same file are not covered.
 - No build can promise that a breach is impossible. These are the threats we
   know of, each with a defence and a test.

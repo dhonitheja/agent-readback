@@ -6,12 +6,13 @@ from .core import Claim, Finding, FindingKind, Status, Verdict, Verifier, compar
 from .evidence import EvidenceLog, FileAnchor
 from .ratelimit import RateLimit, RateLimitTimeout, limit_reads
 from .receipts import (
-    Receipt, ReceiptKeyError, ReceiptLog, ReceiptVerdict, issue_receipt, load_public_key, load_signing_key,
+    AlreadyBilled, Receipt, ReceiptKeyError, ReceiptLog, ReceiptVerdict, issue_receipt, load_public_key, load_signing_key,
     verify_receipt, verify_signed_receipts,
 )
 
 __version__ = "0.3.1"
 __all__ = [
+    "AlreadyBilled",
     "Claim",
     "EvidenceLog",
     "FileAnchor",

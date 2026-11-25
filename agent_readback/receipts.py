@@ -373,6 +373,10 @@ def verify_receipt(receipt: dict[str, Any], key: bytes | str | None = None, *, p
     return None
 
 
+class AlreadyBilled(ValueError):
+    """Raised by `ReceiptLog.append` for a verified receipt whose effect that log already billed."""
+
+
 class ReceiptLog(EvidenceLog):
     """Append-only, hash-chained file of receipts, keyed with the receipt key.
 
@@ -383,6 +387,13 @@ class ReceiptLog(EvidenceLog):
     `require_signed=True` (with `public_key=`) refuses every receipt that is
     not Ed25519-signed, so a log made with only the shared HMAC key cannot
     pass a check against the issuer's public key.
+
+    An effect is billed at most once per log: appending a second verified
+    receipt for an effect the log already holds as verified raises
+    `AlreadyBilled`, checked under the same lock as the write, so overlapping
+    `reconcile()` calls that share one `ReceiptLog` cannot both bill it. The
+    check covers writers in this process that share the instance; give each
+    receipt log a single writing process.
     """
 
     _is_evidence_log = False
@@ -402,6 +413,7 @@ class ReceiptLog(EvidenceLog):
             raise ValueError("require_signed needs public_key= or signing_key=")
         self.require_signed = require_signed
         self._contents_checked = False
+        self._billed: set[str] = set()  # verified effect digests, loaded with the first content check
         for number, record in enumerate(self.records()):
             if record["body"].get("receipt_version") is None:
                 raise ValueError(f"{self.path} is not a receipt log (record {number} is not a receipt)")
@@ -419,8 +431,16 @@ class ReceiptLog(EvidenceLog):
                 problems = self.verify()
                 if problems:
                     raise ValueError(f"refusing to append to {self.path.name}: it does not verify with this log's keys: {problems[0]}")
+                self._billed = {r["effect_digest"] for r in self.receipts()
+                                if r["verdict"] == ReceiptVerdict.VERIFIED.value and r["effect_digest"]}
                 self._contents_checked = True
-            return self._write(receipt.to_dict())
+            digest = receipt.effect_digest if receipt.billable else None
+            if digest and digest in self._billed:
+                raise AlreadyBilled(f"{self.path.name} already holds a verified receipt for this effect")
+            written = self._write(receipt.to_dict())
+            if digest:
+                self._billed.add(digest)
+            return written
 
     def _check(self, body: dict[str, Any]) -> str | None:
         if isinstance(body, dict) and body.get("mac_alg") == SIG_ALG:

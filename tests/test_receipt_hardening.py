@@ -113,8 +113,8 @@ def test_a_signed_receipt_needs_the_public_key(tmp_path):
 def test_signed_receipt_log_round_trip_and_public_check(tmp_path):
     private, _, _ = keypair(tmp_path)
     log = ReceiptLog(tmp_path / "r.jsonl", key=KEY, signing_key=private)
-    for _ in range(3):
-        log.append(issue_receipt(verdict(), KEY, signing_key=private))
+    for n in range(3):  # three refunds: a log bills each effect once
+        log.append(issue_receipt(verdict(), KEY, signing_key=private, effect=f"stripe:refund:re_{n}"))
     assert log.verify() == []
     assert verify_signed_receipts(log.path, private.public_key()) == (3, [])
     with pytest.raises(ValueError, match="does not verify"):
@@ -455,7 +455,7 @@ def test_a_receipt_log_written_with_another_key_is_never_appended_to(tmp_path):
     assert (tmp_path / "r.jsonl").read_bytes() == before
     same = ReceiptLog(tmp_path / "s.jsonl", key=KEY)
     same.append(issue_receipt(verdict(), KEY))
-    ReceiptLog(same.path, key=KEY).append(issue_receipt(verdict(), KEY))  # same key: fine
+    ReceiptLog(same.path, key=KEY).append(issue_receipt(verdict(), KEY, effect="stripe:refund:re_2"))  # same key: fine
     assert len(ReceiptLog(same.path, key=KEY).receipts()) == 2
 
 
@@ -480,3 +480,69 @@ def test_a_rerun_into_the_same_receipt_log_never_bills_twice(tmp_path, stripe_cl
     assert second["verified"] == 0
     verdicts = [r["verdict"] for r in ReceiptLog(receipts, key=KEY).receipts()]
     assert verdicts == ["verified", "contradicted"]
+
+
+# -- CodeRabbit review on 2fe98d9 --------------------------------------------------------
+
+class BrokenEvidenceLog:
+    def append(self, verdict):
+        raise OSError("evidence disk full")
+
+
+@pytest.mark.parametrize("is_async", [False, True])
+def test_a_failed_evidence_log_write_still_leaves_a_receipt(tmp_path, is_async):
+    import asyncio
+
+    stripe = Stripe()
+    receipts = ReceiptLog(tmp_path / "r.jsonl", key=KEY)
+
+    def issue_refund(amount):
+        stripe.refund("pi_A1", amount)
+        return "ok"
+
+    async def issue_refund_async(amount):
+        return issue_refund(amount)
+
+    to_claim = lambda amount: Claim("stripe.refund.create", "", {"payment_intent": "pi_A1", "amount": amount})  # noqa: E731
+    fn = issue_refund_async if is_async else issue_refund
+    refund = receipted(fn, StripeRefundVerifier(stripe.client()), to_claim, receipts, log=BrokenEvidenceLog())
+    with pytest.raises(OSError, match="evidence disk full"):
+        asyncio.run(refund(2500)) if is_async else refund(2500)
+    assert [r["verdict"] for r in receipts.receipts()] == ["verified"]
+
+
+def test_a_receipt_log_bills_each_effect_once(tmp_path):
+    from agent_readback import AlreadyBilled
+
+    log = ReceiptLog(tmp_path / "r.jsonl", key=KEY)
+    first = issue_receipt(verdict(), KEY, effect="stripe:refund:re_1")
+    log.append(first)
+    with pytest.raises(AlreadyBilled):
+        log.append(issue_receipt(verdict(), KEY, effect="stripe:refund:re_1"))
+    with pytest.raises(AlreadyBilled):  # a fresh instance loads what the file already billed
+        ReceiptLog(log.path, key=KEY).append(issue_receipt(verdict(), KEY, effect="stripe:refund:re_1"))
+    log.append(issue_receipt(verdict(Status.FAILED), KEY, effect="stripe:refund:re_1"))  # not billable: fine
+    log.append(issue_receipt(verdict(), KEY, effect="stripe:refund:re_2"))
+    assert [r["billable"] for r in ReceiptLog(log.path, key=KEY).receipts()] == [True, False, True]
+
+
+def test_overlapping_reconciles_sharing_a_receipt_log_bill_an_effect_once(tmp_path):
+    stripe = Stripe()
+    stripe.refund("pi_A1", 2500)
+    path = csv_file(tmp_path, ["fin-1,stripe.refund.create,pi_A1,2500,usd"])
+    shared = ReceiptLog(tmp_path / "november.jsonl", key=KEY)
+
+    class Overlapping(StripeRefunds):
+        ran = False
+
+        def find(self, claim, oid):
+            if not Overlapping.ran:  # the other run starts after this one read the log's history
+                Overlapping.ran = True
+                run_stripe(stripe, path, receipts=shared)
+            return super().find(claim, oid)
+
+    finder = Overlapping(StripeRefundVerifier(stripe.client()))
+    (late,) = reconcile(load_outcomes(path, system="stripe"), finder, KEY, receipts=shared)
+    assert late.verdict == "contradicted" and "already_billed" in [r["kind"] for r in late.reasons]
+    rows = ReceiptLog(shared.path, key=KEY).receipts()
+    assert [r["billable"] for r in rows] == [True, False]

@@ -134,6 +134,21 @@ def _issue_keeping(error: BaseException, issue: Callable[..., Any], *args: Any) 
             error.add_note(f"readback: receipt step failed: {type(secondary).__name__}: {secondary}")
 
 
+class _Seen:
+    """The evidence log for one `receipted()` call: keeps each verdict before writing it on.
+
+    So a failed evidence-log write still leaves the verdict for the receipt.
+    """
+
+    def __init__(self, log: Any) -> None:
+        self.verdicts: list[Verdict] = []
+        self._log = log
+
+    def append(self, verdict: Verdict) -> Any:
+        self.verdicts.append(verdict)
+        return None if self._log is None else self._log.append(verdict)
+
+
 def receipted(
     fn: Callable[..., Any],
     verifier: Verifier,
@@ -156,6 +171,8 @@ def receipted(
     an MCP `ClientSession.call_tool` the caller gets the exception. If `fn`
     itself raises, its receipt is still issued and its own exception propagates;
     if issuing that receipt fails too, the failure is added to it as a note.
+    If writing the evidence log fails, the receipt is still issued from the
+    verdict and the logging error propagates.
 
     `outcome_id(*args, **kwargs)` may return an id to store on the receipt.
 
@@ -166,15 +183,15 @@ def receipted(
     receipt_key(receipts.key)  # fail at wrap time, not on the first refund
     verdict_callbacks, receipt_callbacks = tuple(on_verdict), tuple(on_receipt)
 
-    def inner(seen: list[Verdict]) -> Callable[..., Any]:
+    def inner(seen: _Seen) -> Callable[..., Any]:
         # A fresh wrapper per call: parallel calls (ToolNode threads) never share `seen`.
-        return watched(fn, verifier, to_claim, log, said=said, on_verdict=(seen.append, *verdict_callbacks), **watch_options)
+        return watched(fn, verifier, to_claim, seen, said=said, on_verdict=verdict_callbacks, **watch_options)
 
-    def issue(seen: list[Verdict], args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
-        if not seen:
+    def issue(seen: _Seen, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
+        if not seen.verdicts:
             return None  # to_claim returned None: nothing was checked
         oid = outcome_id(*args, **kwargs) if outcome_id is not None else None
-        receipt = issue_receipt(seen[-1], receipts.key, outcome_id=oid, signing_key=receipts.signing_key)
+        receipt = issue_receipt(seen.verdicts[-1], receipts.key, outcome_id=oid, signing_key=receipts.signing_key)
         receipts.append(receipt)
         for callback in receipt_callbacks:
             callback(receipt)
@@ -188,7 +205,7 @@ def receipted(
 
         @functools.wraps(fn)
         async def run_async(*args: Any, **kwargs: Any) -> Any:
-            seen: list[Verdict] = []
+            seen = _Seen(log)
             try:
                 result = await inner(seen)(*args, **kwargs)
             except BaseException as error:
@@ -201,7 +218,7 @@ def receipted(
 
     @functools.wraps(fn)
     def run(*args: Any, **kwargs: Any) -> Any:
-        seen: list[Verdict] = []
+        seen = _Seen(log)
         try:
             result = inner(seen)(*args, **kwargs)
         except BaseException as error:

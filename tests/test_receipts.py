@@ -226,8 +226,8 @@ def test_receipt_log_round_trip_and_cli(tmp_path, monkeypatch, capsys):
     path = tmp_path / "receipts.jsonl"
     anchor = FileAnchor(tmp_path / "anchor.json")
     log = ReceiptLog(path, key=KEY, anchor=anchor)
-    for _ in range(3):
-        log.append(issue_receipt(refund_verdict(), KEY))
+    for n in range(3):  # three refunds: a log bills each effect once
+        log.append(issue_receipt(refund_verdict(), KEY, effect=f"stripe:refund:re_{n}"))
     assert log.verify() == [] and len(ReceiptLog(path, key=KEY).receipts()) == 3
 
     monkeypatch.setenv(RECEIPT_KEY_ENV, KEY)
