@@ -17,6 +17,7 @@ and no error message repeats a value from it.
 from __future__ import annotations
 
 import csv
+import errno
 import io
 import json
 import re
@@ -267,7 +268,9 @@ class StripeRefunds:
                 found.contradicted.append(Finding(FindingKind.WRONG_VALUE, "status differs", "status"))
             elif status in ("failed", "canceled"):
                 found.contradicted.append(Finding(FindingKind.WRONG_VALUE, "refund did not go through", "status"))
-            elif status == "pending" and "status" not in claim.expected:
+            elif status != "succeeded":
+                # Pending or waiting on the customer is never billable, even
+                # when the export itself claims that status.
                 found.pending.append((effect, item))
             else:
                 found.matches.append((effect, item))
@@ -314,6 +317,9 @@ def prior_effects(paths: Iterable[str | Path], key: bytes | str | None = None, *
     secret = receipt_key(key)
     used: set[str] = set()
     for path in paths:
+        if not Path(path).is_file():
+            # A misspelt path must not read as an empty history.
+            raise FileNotFoundError(errno.ENOENT, f"prior receipt log {Path(path).name} not found", str(path))
         log = ReceiptLog(path, key=secret, public_key=public_key)
         problems = log.verify()
         if problems:

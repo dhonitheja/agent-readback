@@ -23,3 +23,20 @@ def create_claim(**overrides):
     expected = {"patient": PATIENT, "practitioner": DOCTOR, "start": START, "end": END, "status": "booked"}
     expected.update(overrides)
     return Claim("fhir.appointment.create", "DONE", expected)
+
+
+_RANDOM_FIELDS = ("checked_at", "issued_at")
+
+
+def leak_text(receipts, extra: str = "") -> str:
+    """Receipts as text for leak checks, with the parts that are random by design blanked.
+
+    Ids, digests and MACs are hex, and timestamps carry microseconds, so a value
+    like "2500" can turn up in them by chance; leak checks look at everything else.
+    """
+    import json
+    import re
+
+    items = receipts if isinstance(receipts, list) else [receipts]
+    text = json.dumps([{k: ("-" if k in _RANDOM_FIELDS else v) for k, v in item.items()} for item in items]) + extra
+    return re.sub(r"[0-9a-f]{32,}", "<hex>", text)

@@ -283,3 +283,55 @@ def test_cli_refuses_a_readable_signing_key(tmp_path, stripe_cli, capsys):
     assert main(["reconcile", str(path), "--system", "stripe", "--receipts", str(tmp_path / "r.jsonl"),
                  "--signing-key", str(private_path)]) == 2
     assert "owner only" in capsys.readouterr().err and stripe_cli.methods == []
+
+
+# -- Review findings on the receipts PR -------------------------------------------------
+
+STATUS_HEADER = "outcome_id,action,payment_intent,amount,currency,status\n"
+
+
+@pytest.mark.parametrize("status", ["pending", "requires_action"])
+def test_an_unsettled_refund_is_never_billable_even_when_the_export_claims_it(tmp_path, status):
+    stripe = Stripe()
+    stripe.refund("pi_A1", 2500, status=status)
+    claimed = csv_file(tmp_path, [f"fin-1,stripe.refund.create,pi_A1,2500,usd,{status}"], header=STATUS_HEADER)
+    unclaimed = csv_file(tmp_path, ["fin-2,stripe.refund.create,pi_A1,2500,usd"], name="u.csv")
+    assert [r.verdict for r in run_stripe(stripe, claimed)] == ["pending"]
+    assert [r.verdict for r in run_stripe(stripe, unclaimed)] == ["pending"]
+    assert summarise(run_stripe(stripe, claimed))["verified"] == 0
+
+
+def test_a_settled_refund_claimed_as_succeeded_still_verifies(tmp_path):
+    stripe = Stripe()
+    stripe.refund("pi_A1", 2500)
+    path = csv_file(tmp_path, ["fin-1,stripe.refund.create,pi_A1,2500,usd,succeeded"], header=STATUS_HEADER)
+    assert [r.verdict for r in run_stripe(stripe, path)] == ["verified"]
+
+
+def test_a_public_key_check_refuses_a_log_made_with_only_the_shared_key(tmp_path, monkeypatch, capsys):
+    """Whoever holds READBACK_RECEIPT_KEY can write HMAC receipts; they must not pass for the issuer's."""
+    private, _, public_path = keypair(tmp_path)
+    forged = ReceiptLog(tmp_path / "forged.jsonl", key=KEY)
+    forged.append(issue_receipt(verdict(), KEY))
+    assert forged.verify() == []
+    strict = ReceiptLog(forged.path, key=KEY, public_key=private.public_key(), require_signed=True)
+    assert "not signed with Ed25519" in strict.verify()[0]
+    monkeypatch.setenv(RECEIPT_KEY_ENV, KEY)
+    assert main(["verify-receipts", str(forged.path), "--public-key", str(public_path)]) == 1
+    assert "not signed with Ed25519" in capsys.readouterr().out
+    with pytest.raises(ValueError, match="require_signed"):
+        ReceiptLog(tmp_path / "x.jsonl", key=KEY, require_signed=True)
+
+
+def test_a_missing_prior_log_stops_reconciliation(tmp_path, stripe_cli, capsys):
+    with pytest.raises(FileNotFoundError, match="not found"):
+        prior_effects([tmp_path / "octber.jsonl"], KEY)
+    with pytest.raises(FileNotFoundError):
+        prior_effects([tmp_path], KEY)  # a folder is not a log either
+    stripe_cli.refund("pi_A1", 1)
+    path = csv_file(tmp_path, ["fin-1,stripe.refund.create,pi_A1,1,usd"])
+    receipts = tmp_path / "r.jsonl"
+    assert main(["reconcile", str(path), "--system", "stripe", "--receipts", str(receipts),
+                 "--prior", str(tmp_path / "octber.jsonl")]) == 3
+    assert "not found" in capsys.readouterr().err
+    assert stripe_cli.methods == [] and not receipts.exists()

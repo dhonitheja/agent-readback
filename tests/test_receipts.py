@@ -18,7 +18,7 @@ from agent_readback.cli import main
 from agent_readback.evidence import FileAnchor
 from agent_readback.receipts import RECEIPT_KEY_ENV, effect_of
 from agent_readback.verifiers import FhirAppointmentVerifier, StripeRefundVerifier
-from tests.conftest import DOCTOR, END, PATIENT, START
+from tests.conftest import DOCTOR, END, PATIENT, START, leak_text
 from tests.test_stripe_sql_alerts import MockStripe
 
 KEY = "test-receipt-key-0123456789abcdef-not-a-real-secret"
@@ -87,7 +87,7 @@ def test_reasons_carry_kinds_and_field_names_only():
 def test_receipt_holds_no_identifiers_or_values():
     """SEC-2: no payment intent, refund id, amount or agent text anywhere in the receipt."""
     verdict = refund_verdict()
-    text = json.dumps(issue_receipt(verdict, KEY, outcome_id="fin-1").to_dict())
+    text = leak_text(issue_receipt(verdict, KEY, outcome_id="fin-1").to_dict())
     for leaked in ("pi_SECRET42", "re_1", "2500", "refunded", "usd", "ch_1"):
         assert leaked not in text
 

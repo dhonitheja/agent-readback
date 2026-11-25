@@ -350,6 +350,10 @@ class ReceiptLog(EvidenceLog):
     Same file guarantees as EvidenceLog (owner-only, append mode, optional
     anchor). It refuses to open a file that holds anything but receipts, so
     receipts never land in an evidence log.
+
+    `require_signed=True` (with `public_key=`) refuses every receipt that is
+    not Ed25519-signed, so a log made with only the shared HMAC key cannot
+    pass a check against the issuer's public key.
     """
 
     _is_evidence_log = False
@@ -359,12 +363,15 @@ class ReceiptLog(EvidenceLog):
         return receipt_key(key)
 
     def __init__(self, path: str | Path, key: bytes | str | None = None, anchor: Any = None, *,
-                 signing_key: Any = None, public_key: Any = None) -> None:
+                 signing_key: Any = None, public_key: Any = None, require_signed: bool = False) -> None:
         if Path(path).is_symlink():
             raise ValueError(f"{path} is a symbolic link; give the receipt log's real path")
         super().__init__(path, key=key, anchor=anchor)
         self.signing_key = signing_key
         self.public_key = public_key if public_key is not None or signing_key is None else signing_key.public_key()
+        if require_signed and self.public_key is None:
+            raise ValueError("require_signed needs public_key= or signing_key=")
+        self.require_signed = require_signed
         for number, record in enumerate(self.records()):
             if record["body"].get("receipt_version") is None:
                 raise ValueError(f"{self.path} is not a receipt log (record {number} is not a receipt)")
@@ -383,6 +390,10 @@ class ReceiptLog(EvidenceLog):
             if self.public_key is None:
                 return "signed with Ed25519: open the log with public_key= or signing_key="
             return verify_receipt(body, public_key=self.public_key)
+        if self.require_signed:
+            # Checking against the issuer's public key: a receipt that only the
+            # shared HMAC key vouches for does not prove who issued it.
+            return "not signed with Ed25519: the issuer's public key cannot vouch for it"
         return verify_receipt(body, self.key)
 
     def receipts(self) -> list[dict[str, Any]]:

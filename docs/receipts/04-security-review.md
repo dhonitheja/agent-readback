@@ -1,6 +1,6 @@
 # Readback Receipts: security verification
 
-Status: 2026-11-25, updated after fixing the residual risks. Phase 5 (Verify). Branch `feature/readback-receipts`.
+Status: 2026-11-25, updated after fixing the residual risks and the PR review findings. Phase 5 (Verify). Branch `feature/readback-receipts`.
 Reviewed against `01-requirements.md` (SEC-1 to SEC-11) and every threat in
 `02-threat-model.md`. This is the maintainer's own review, done with automated
 tools and a manual read of the new code. It is not an external audit, and no
@@ -11,7 +11,7 @@ know of has a defence and a test, and that what is left is written down.
 
 | Check | Tool and scope | Result |
 |---|---|---|
-| Tests | `pytest`, full suite, run twice | 340 tests: 335 pass, 5 Windows-only ACL tests skip on Linux. 134 are new (62 receipts, 51 reconciliation and CLI, 21 for the fixes below) |
+| Tests | `pytest`, full suite, run twice | 345 tests: 340 pass, 5 Windows-only ACL tests skip on Linux. 139 are new (62 receipts, 51 reconciliation and CLI, 26 for the fixes below) |
 | Static analysis | `bandit 1.9.4 -r agent_readback examples` (the CI gate) | Clean. One new low finding (B105 on the environment variable *name* `READBACK_FHIR_TOKEN`) is a false positive, marked `# nosec B105` with the reason |
 | Static analysis, wider | `ruff` rules F, E9, B, S on the changed files | Nothing new to fix. `zip()` in the CSV parser now uses `strict=True`. The other hits are the same B105 name, the existing `icacls` call in `evidence.py` (fixed argument list, no shell) and an existing `__call__` check moved unchanged into `_is_async` |
 | Dependency audit | `pip-audit 2.10.1 --skip-editable`, with `cryptography` installed | No known vulnerabilities. No new runtime dependency: httpx is still the only one; `cryptography` is only in the optional `signatures` extra |
@@ -41,6 +41,10 @@ know of has a defence and a test, and that what is left is written down.
 | F2 | Low | Regexes anchored with `$` also match before a trailing newline | Fixed in new code (`fullmatch`) |
 | F3 | Low (existing code) | The same `$` pattern in SQL identifier and placeholder checks, evidence hash and anchor checks, and the Windows SID check | Fixed: all use `fullmatch`. `test_sql_identifiers_and_placeholders_cannot_end_in_a_newline`, `test_an_anchor_head_with_a_trailing_newline_is_refused` |
 | F4 | Low | A receipt log path that is a symlink was followed | Fixed: refused. `test_a_symlinked_receipt_log_is_refused` |
+| F5 | High (PR review) | A Stripe refund still `pending` (or `requires_action`) gave a billable `verified` receipt when the export itself claimed that status | Fixed: only a `succeeded` refund can verify. `test_an_unsettled_refund_is_never_billable_even_when_the_export_claims_it` |
+| F6 | High (PR review) | `verify-receipts --public-key` with the receipt key set fell back to HMAC for HMAC receipts, so a log forged with only the shared key passed against the issuer's public key | Fixed: `ReceiptLog(require_signed=True)` refuses every unsigned receipt, and the CLI uses it. `test_a_public_key_check_refuses_a_log_made_with_only_the_shared_key` |
+| F7 | Medium (PR review) | A misspelt or missing `--prior` path read as an empty history, so already billed effects could be billed again | Fixed: a missing or non-file prior log stops the run (exit 3) before any read. `test_a_missing_prior_log_stops_reconciliation` |
+| F8 | Low (CI) | Two leak tests searched the whole receipt text, which holds random hex and microsecond timestamps, so a value like `2500` could appear by chance and fail the run | Fixed: the leak checks blank the random-by-design fields first (`leak_text` in `tests/conftest.py`) |
 
 ## Residual risks from the first review, and what became of each
 

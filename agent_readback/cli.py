@@ -298,7 +298,7 @@ def verify_receipts_main(args: argparse.Namespace) -> int:
             print("note: without the receipt key the keyed chain is not recomputed; use the issuer's anchor to catch dropped receipts")
             return OK
     try:
-        log = ReceiptLog(path, public_key=public_key)
+        log = ReceiptLog(path, public_key=public_key, require_signed=public_key is not None)
         problems = log.verify()
         records = log.records()
     except ReceiptKeyError as error:

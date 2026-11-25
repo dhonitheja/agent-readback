@@ -14,8 +14,10 @@ All notable changes to `agent-readback`. Dates are UTC.
 - `readback reconcile`: reads a vendor's outcome export (CSV or JSONL) back
   against Stripe refunds or FHIR appointments and reports billed against
   verified. One effect backs one outcome; `--prior` receipt logs catch
-  re-billing across periods; `--since` ignores older refunds. GET only,
-  rate-limited, credentials from the environment only.
+  re-billing across periods (a missing `--prior` file stops the run);
+  `--since` ignores older refunds. A refund that has not settled is never
+  billable, even when the export claims its status. GET only, rate-limited,
+  credentials from the environment only.
 - `readback verify-receipts`, with `--anchor` / `--head`.
 - `receipted()` and `OutcomeNotVerified`: a tool wrapper that writes a receipt
   and raises unless the outcome is verified, so an agent cannot report done on
@@ -23,7 +25,9 @@ All notable changes to `agent-readback`. Dates are UTC.
 - Optional Ed25519 receipts (`agent-readback[signatures]`): `signing_key=` on
   `issue_receipt`, `ReceiptLog` and `reconcile`, `reconcile --signing-key`,
   `verify-receipts --public-key` (no receipt key needed) and
-  `verify_signed_receipts()`. A public-key check refuses HMAC receipts.
+  `verify_signed_receipts()`. A public-key check refuses HMAC receipts,
+  including in a log opened with the receipt key (`ReceiptLog(...,
+  require_signed=True)`, which `verify-receipts --public-key` uses).
 - Receipts store a keyed `oid_...` stand-in for outcome ids by default
   (`--keep-outcome-ids` to store them as given).
 - `reconcile --match-metadata KEY`: a Stripe refund only counts if its metadata

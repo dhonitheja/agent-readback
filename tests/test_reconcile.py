@@ -16,7 +16,7 @@ from agent_readback.reconcile import (
 )
 from agent_readback.receipts import RECEIPT_KEY_ENV
 from agent_readback.verifiers import FhirAppointmentVerifier, StripeRefundVerifier
-from tests.conftest import DOCTOR, END, PATIENT, START
+from tests.conftest import DOCTOR, END, PATIENT, START, leak_text
 from tests.test_stripe_sql_alerts import MockStripe
 
 KEY = "test-receipt-key-0123456789abcdef-not-a-real-secret"
@@ -187,7 +187,7 @@ def test_receipts_and_report_hold_no_identifiers_or_values(tmp_path):
     stripe.refund("pi_SECRET1", 2500)
     path = csv_file(tmp_path, ["fin-1,stripe.refund.create,pi_SECRET1,2500,usd", "fin-2,stripe.refund.create,pi_SECRET2,4321,usd"])
     receipts = run_stripe(stripe, path)
-    text = json.dumps([r.to_dict() for r in receipts]) + render(summarise(receipts)) + json.dumps(summarise(receipts))
+    text = leak_text([r.to_dict() for r in receipts], render(summarise(receipts)) + json.dumps(summarise(receipts)))
     for leaked in ("pi_SECRET1", "pi_SECRET2", "re_1", "2500", "4321", "usd"):
         assert leaked not in text
 
@@ -234,7 +234,7 @@ def test_fhir_create_update_cancel(tmp_path, server, tools):
     assert receipts[1].reasons == ({"kind": "duplicate_effect", "field": None},)
     assert receipts[3].reasons == ({"kind": "wrong_value", "field": "status"},)
     assert receipts[4].reasons == ({"kind": "duplicate_effect", "field": None},)
-    text = json.dumps([r.to_dict() for r in receipts])
+    text = leak_text([r.to_dict() for r in receipts])
     assert PATIENT not in text and DOCTOR not in text and "2027-01-04" not in text
 
 
