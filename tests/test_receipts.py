@@ -156,7 +156,8 @@ def test_a_receipt_log_key_is_not_registered_as_a_log_key(tmp_path):
 
     ReceiptLog(tmp_path / "r.jsonl", key=KEY)
     WebhookAlert("https://alerts.test", key=KEY)  # the receipt log did not mark its key as a log key
-    issue_receipt(refund_verdict(), KEY)  # still a valid receipt key afterwards
+    with pytest.raises(ReceiptKeyError, match="READBACK_ALERT_KEY"):
+        issue_receipt(refund_verdict(), KEY)  # but an alert now signs with it, so it is no receipt key
 
 
 # -- verify one receipt (FR-5, SEC-4) ---------------------------------------------------

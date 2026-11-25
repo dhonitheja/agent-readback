@@ -36,7 +36,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
-from .alerts import ALERT_KEY_ENV
+from .alerts import ALERT_KEY_ENV, is_alert_key
 from .core import FindingKind, Status, Verdict
 from .evidence import KEY_ENV as LOG_KEY_ENV
 from .evidence import EvidenceLog, is_log_key
@@ -129,8 +129,7 @@ def receipt_key(key: bytes | str | None = None) -> bytes:
         raise ReceiptKeyError(f"the receipt key must be at least {MIN_KEY_BYTES} bytes")
     if is_log_key(raw):
         raise ReceiptKeyError(f"the receipt key must differ from {LOG_KEY_ENV}: receipts leave the machine, the log key must not")
-    alert = os.environ.get(ALERT_KEY_ENV, "").encode()
-    if alert and hmac.compare_digest(raw, alert):
+    if is_alert_key(raw):
         raise ReceiptKeyError(f"the receipt key must differ from {ALERT_KEY_ENV}")
     return raw
 
@@ -402,6 +401,7 @@ class ReceiptLog(EvidenceLog):
         if require_signed and self.public_key is None:
             raise ValueError("require_signed needs public_key= or signing_key=")
         self.require_signed = require_signed
+        self._contents_checked = False
         for number, record in enumerate(self.records()):
             if record["body"].get("receipt_version") is None:
                 raise ValueError(f"{self.path} is not a receipt log (record {number} is not a receipt)")
@@ -413,6 +413,13 @@ class ReceiptLog(EvidenceLog):
         if problem:
             raise ValueError(f"refusing to log a receipt that does not verify with this log's key: {problem}")
         with self._lock:
+            if not self._contents_checked:
+                # Opened with another key, or tampered with: appending would
+                # extend a chain that no single key can verify.
+                problems = self.verify()
+                if problems:
+                    raise ValueError(f"refusing to append to {self.path.name}: it does not verify with this log's keys: {problems[0]}")
+                self._contents_checked = True
             return self._write(receipt.to_dict())
 
     def _check(self, body: dict[str, Any]) -> str | None:

@@ -125,6 +125,15 @@ class OutcomeNotVerified(RuntimeError):
         super().__init__(f"outcome not verified: {receipt.verdict}" + (f" ({', '.join(kinds)})" if kinds else ""))
 
 
+def _issue_keeping(error: BaseException, issue: Callable[..., Any], *args: Any) -> None:
+    """Issue the receipt for a call that raised, without letting a receipt failure replace its exception."""
+    try:
+        issue(*args)
+    except Exception as secondary:  # the tool's own exception is what the caller handles
+        if hasattr(error, "add_note"):  # Python 3.11+
+            error.add_note(f"readback: receipt step failed: {type(secondary).__name__}: {secondary}")
+
+
 def receipted(
     fn: Callable[..., Any],
     verifier: Verifier,
@@ -145,7 +154,8 @@ def receipted(
     raised, so the agent never sees a success it can report as "done". In a
     LangGraph `ToolNode` the error becomes the tool message the model reads; on
     an MCP `ClientSession.call_tool` the caller gets the exception. If `fn`
-    itself raises, its receipt is still issued and its own exception propagates.
+    itself raises, its receipt is still issued and its own exception propagates;
+    if issuing that receipt fails too, the failure is added to it as a note.
 
     `outcome_id(*args, **kwargs)` may return an id to store on the receipt.
 
@@ -158,7 +168,7 @@ def receipted(
 
     def inner(seen: list[Verdict]) -> Callable[..., Any]:
         # A fresh wrapper per call: parallel calls (ToolNode threads) never share `seen`.
-        return watched(fn, verifier, to_claim, log, said=said, on_verdict=(*verdict_callbacks, seen.append), **watch_options)
+        return watched(fn, verifier, to_claim, log, said=said, on_verdict=(seen.append, *verdict_callbacks), **watch_options)
 
     def issue(seen: list[Verdict], args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
         if not seen:
@@ -181,8 +191,8 @@ def receipted(
             seen: list[Verdict] = []
             try:
                 result = await inner(seen)(*args, **kwargs)
-            except BaseException:
-                issue(seen, args, kwargs)
+            except BaseException as error:
+                _issue_keeping(error, issue, seen, args, kwargs)
                 raise
             gate(issue(seen, args, kwargs))
             return result
@@ -194,8 +204,8 @@ def receipted(
         seen: list[Verdict] = []
         try:
             result = inner(seen)(*args, **kwargs)
-        except BaseException:
-            issue(seen, args, kwargs)
+        except BaseException as error:
+            _issue_keeping(error, issue, seen, args, kwargs)
             raise
         gate(issue(seen, args, kwargs))
         return result

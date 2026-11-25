@@ -40,3 +40,13 @@ def leak_text(receipts, extra: str = "") -> str:
     items = receipts if isinstance(receipts, list) else [receipts]
     text = json.dumps([{k: ("-" if k in _RANDOM_FIELDS else v) for k, v in item.items()} for item in items]) + extra
     return re.sub(r"[0-9a-f]{32,}", "<hex>", text)
+
+
+@pytest.fixture(autouse=True)
+def _forget_alert_keys():
+    """WebhookAlert remembers its keys for the whole process; each test starts clean."""
+    from agent_readback import alerts
+
+    alerts._ALERT_KEY_FINGERPRINTS.clear()
+    yield
+    alerts._ALERT_KEY_FINGERPRINTS.clear()

@@ -381,3 +381,102 @@ def test_receipted_only_bills_a_settled_refund(tmp_path, claimed, actual, expect
             refund(2500)
     (receipt,) = log.receipts()
     assert receipt["verdict"] == expected and receipt["billable"] is (expected == "verified")
+
+
+# -- CodeRabbit review on the receipts PR -----------------------------------------------
+
+def _receipted_refund(tmp_path, stripe, **options):
+    log = ReceiptLog(tmp_path / "r.jsonl", key=KEY)
+
+    def issue_refund(amount):
+        stripe.refund("pi_A1", amount)
+        return "ok"
+
+    to_claim = lambda amount: Claim("stripe.refund.create", "", {"payment_intent": "pi_A1", "amount": amount})  # noqa: E731
+    return receipted(issue_refund, StripeRefundVerifier(stripe.client()), to_claim, log, **options), log
+
+
+def test_a_failing_verdict_callback_still_leaves_a_receipt(tmp_path):
+    def broken(verdict):
+        raise RuntimeError("callback broke")
+
+    refund, log = _receipted_refund(tmp_path, Stripe(), on_verdict=[broken])
+    with pytest.raises(RuntimeError, match="callback broke"):
+        refund(2500)
+    assert [r["verdict"] for r in log.receipts()] == ["verified"]
+
+
+def test_the_tools_own_exception_survives_a_receipt_failure(tmp_path):
+    class ToolError(Exception):
+        pass
+
+    def broken_receipt(receipt):
+        raise OSError("disk full")
+
+    log = ReceiptLog(tmp_path / "r.jsonl", key=KEY)
+    stripe = Stripe()
+
+    def issue_refund(amount):
+        stripe.refund("pi_A1", amount)
+        raise ToolError("upstream timeout")
+
+    to_claim = lambda amount: Claim("stripe.refund.create", "", {"payment_intent": "pi_A1", "amount": amount})  # noqa: E731
+    refund = receipted(issue_refund, StripeRefundVerifier(stripe.client()), to_claim, log, on_receipt=[broken_receipt])
+    with pytest.raises(ToolError) as raised:
+        refund(2500)
+    assert len(log.receipts()) == 1
+    if hasattr(raised.value, "__notes__"):
+        assert "receipt step failed: OSError" in raised.value.__notes__[0]
+
+
+def test_a_bad_metadata_key_is_a_usage_error(tmp_path, stripe_cli, capsys):
+    path = csv_file(tmp_path, ["fin-1,stripe.refund.create,pi_A1,1,usd"])
+    assert main(["reconcile", str(path), "--system", "stripe", "--receipts", str(tmp_path / "r.jsonl"),
+                 "--match-metadata", "has space"]) == 2
+    assert "--match-metadata" in capsys.readouterr().err and stripe_cli.methods == []
+
+
+def test_an_alert_key_given_only_in_code_is_refused_as_a_receipt_key():
+    from agent_readback import WebhookAlert
+
+    alert_key = "alert-key-only-in-code-0123456789abcdef"
+    WebhookAlert("https://alerts.test/hook", key=alert_key)
+    with pytest.raises(ReceiptKeyError, match="READBACK_ALERT_KEY"):
+        issue_receipt(verdict(), alert_key)
+
+
+def test_a_receipt_log_written_with_another_key_is_never_appended_to(tmp_path):
+    other = "another-receipt-key-0123456789abcdef-test"
+    ReceiptLog(tmp_path / "r.jsonl", key=other).append(issue_receipt(verdict(), other))
+    before = (tmp_path / "r.jsonl").read_bytes()
+    log = ReceiptLog(tmp_path / "r.jsonl", key=KEY)
+    with pytest.raises(ValueError, match="does not verify"):
+        log.append(issue_receipt(verdict(), KEY))
+    assert (tmp_path / "r.jsonl").read_bytes() == before
+    same = ReceiptLog(tmp_path / "s.jsonl", key=KEY)
+    same.append(issue_receipt(verdict(), KEY))
+    ReceiptLog(same.path, key=KEY).append(issue_receipt(verdict(), KEY))  # same key: fine
+    assert len(ReceiptLog(same.path, key=KEY).receipts()) == 2
+
+
+def test_an_action_that_is_not_text_is_an_export_error(tmp_path):
+    from agent_readback.reconcile import ExportError
+
+    path = tmp_path / "o.jsonl"
+    path.write_text(json.dumps({"outcome_id": "fin-1", "action": [], "expected": {"payment_intent": "pi_A1", "amount": 1, "currency": "usd"}}) + "\n")
+    with pytest.raises(ExportError, match="unknown action"):
+        load_outcomes(path, system="stripe")
+
+
+def test_a_rerun_into_the_same_receipt_log_never_bills_twice(tmp_path, stripe_cli, capsys):
+    stripe_cli.refund("pi_A1", 2500)
+    path = csv_file(tmp_path, ["fin-1,stripe.refund.create,pi_A1,2500,usd"])
+    receipts = tmp_path / "november.jsonl"
+    args = ["reconcile", str(path), "--system", "stripe", "--receipts", str(receipts), "--json"]
+    assert main(args) == 0
+    capsys.readouterr()
+    assert main(args) == 1
+    second = json.loads(capsys.readouterr().out)
+    assert second["verified"] == 0
+    verdicts = [r["verdict"] for r in ReceiptLog(receipts, key=KEY).receipts()]
+    assert verdicts == ["verified", "contradicted"]

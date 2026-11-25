@@ -95,7 +95,7 @@ def _outcome(row: dict[str, Any], where: str, system: str | None) -> Outcome:
     outcome_id, action = row.get("outcome_id"), row.get("action")
     if not isinstance(outcome_id, str) or not _OUTCOME_ID.fullmatch(outcome_id):
         raise ExportError(f"{where}: outcome_id must be 1-128 of A-Z a-z 0-9 . _ : - and start with a letter or digit")
-    if action not in ACTIONS:
+    if not isinstance(action, str) or action not in ACTIONS:
         raise ExportError(f"{where}: unknown action (supported: {', '.join(sorted(ACTIONS))})")
     owner, required, allowed = ACTIONS[action]
     if system is not None and owner != system:
@@ -226,7 +226,7 @@ class _Reads:
         return self.cache[subject]
 
 
-_METADATA_KEY = re.compile(r"[A-Za-z0-9_-]{1,40}")  # Stripe metadata keys are at most 40 characters
+METADATA_KEY = re.compile(r"[A-Za-z0-9_-]{1,40}")  # Stripe metadata keys are at most 40 characters
 
 
 _REFUND_STATUSES = frozenset({"succeeded", "pending", "requires_action", "failed", "canceled"})
@@ -241,7 +241,7 @@ class StripeRefunds:
     """
 
     def __init__(self, verifier: StripeRefundVerifier, since: int | None = None, match_metadata: str | None = None) -> None:
-        if match_metadata is not None and not _METADATA_KEY.fullmatch(match_metadata):
+        if match_metadata is not None and not METADATA_KEY.fullmatch(match_metadata):
             raise ValueError("match_metadata must be 1-40 of A-Z a-z 0-9 _ -")
         self.verifier, self.since, self.match_metadata = verifier, since, match_metadata
         self.reads = _Reads(verifier._refunds)
@@ -326,12 +326,15 @@ def prior_effects(paths: Iterable[str | Path], key: bytes | str | None = None, *
         if not Path(path).is_file():
             # A misspelt path must not read as an empty history.
             raise FileNotFoundError(errno.ENOENT, f"prior receipt log {Path(path).name} not found", str(path))
-        log = ReceiptLog(path, key=secret, public_key=public_key)
-        problems = log.verify()
-        if problems:
-            raise ValueError(f"prior receipt log {Path(path).name} does not verify: {problems[0]}")
-        used |= {r["effect_digest"] for r in log.receipts() if r["verdict"] == ReceiptVerdict.VERIFIED.value and r["effect_digest"]}
+        used |= _billed(ReceiptLog(path, key=secret, public_key=public_key), "prior receipt log")
     return used
+
+
+def _billed(log: ReceiptLog, what: str) -> set[str]:
+    problems = log.verify()
+    if problems:
+        raise ValueError(f"{what} {log.path.name} does not verify: {problems[0]}")
+    return {r["effect_digest"] for r in log.receipts() if r["verdict"] == ReceiptVerdict.VERIFIED.value and r["effect_digest"]}
 
 
 def reconcile(
@@ -351,10 +354,15 @@ def reconcile(
     `keep_outcome_ids`, because a vendor's references can hold personal data.
     Pass a `labels` dict to get receipt_id -> original outcome id for your own report.
     Signs with `signing_key`, else the receipt log's signing key, if either is set.
+    Effects already billed in `receipts` count as `prior`, so a rerun into the
+    same log cannot bill them twice.
     """
     secret = receipt_key(key)
     if signing_key is None and receipts is not None:
         signing_key = receipts.signing_key
+    if receipts is not None:
+        # A rerun into the same log must not bill again what that log already billed.
+        prior = frozenset(prior) | _billed(receipts, "receipt log")
     prior, used = frozenset(prior), set(prior)
     seen_ids: set[str] = set()
     out: list[Receipt] = []

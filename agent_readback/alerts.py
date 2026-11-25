@@ -17,6 +17,20 @@ from .evidence import is_log_key
 # signatures, and must never hold the key that can rewrite the evidence log.
 ALERT_KEY_ENV = "READBACK_ALERT_KEY"
 
+# Fingerprints of the keys WebhookAlerts in this process sign with, so the
+# receipt key can refuse an alert key given only as key= (not in the env).
+_ALERT_KEY_FINGERPRINTS: set[str] = set()
+
+
+def _alert_fingerprint(key: bytes) -> str:
+    return hashlib.sha256(b"readback-alert-key:" + key).hexdigest()
+
+
+def is_alert_key(key: bytes) -> bool:
+    """True if `key` is READBACK_ALERT_KEY or a key a WebhookAlert in this process signs with."""
+    env = os.environ.get(ALERT_KEY_ENV, "").encode()
+    return bool(key) and ((bool(env) and hmac.compare_digest(key, env)) or _alert_fingerprint(key) in _ALERT_KEY_FINGERPRINTS)
+
 
 class WebhookAlert:
     """Callable for `watch(..., on_verdict=[WebhookAlert(url)])`.
@@ -42,6 +56,8 @@ class WebhookAlert:
         self.key = key.encode() if isinstance(key, str) else key or None
         if self.key and is_log_key(self.key):
             raise ValueError(f"the alert key must differ from {LOG_KEY_ENV}: the alert receiver must not hold the log key")
+        if self.key:
+            _ALERT_KEY_FINGERPRINTS.add(_alert_fingerprint(self.key))
         self.last_error: Exception | None = None
 
     def __call__(self, verdict: Verdict) -> None:

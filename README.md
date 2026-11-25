@@ -255,7 +255,11 @@ readback verify-receipts r.jsonl --public-key issuer.pub.pem   # no receipt key 
 Reconcile a vendor's outcome export against Stripe:
 
 ```bash
-export READBACK_RECEIPT_KEY=$(python -c "import secrets; print(secrets.token_hex(32))")
+# Once: make the receipt key and keep it (a secrets manager, or an owner-only file).
+python -c "import secrets; print(secrets.token_hex(32))" > receipt.key && chmod 600 receipt.key
+
+# Every period: reuse the same key, or last period's receipts will not verify.
+export READBACK_RECEIPT_KEY=$(cat receipt.key)
 export READBACK_STRIPE_KEY=rk_...          # restricted key with refunds: read; sk_ keys are refused
 readback reconcile november.csv --system stripe --since 2026-11-01 \
     --receipts november-receipts.jsonl --prior october-receipts.jsonl

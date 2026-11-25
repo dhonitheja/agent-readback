@@ -28,7 +28,7 @@ from .dashboard import render_html
 from .evidence import KEY_ENV, EvidenceLog, FileAnchor
 from .ratelimit import RateLimit, limit_reads
 from .receipts import RECEIPT_KEY_ENV, ReceiptKeyError, ReceiptLog, load_public_key, load_signing_key, verify_signed_receipts
-from .reconcile import MAX_ROWS, ExportError, FhirAppointments, StripeRefunds, load_outcomes, parse_since, prior_effects, reconcile
+from .reconcile import MAX_ROWS, METADATA_KEY, ExportError, FhirAppointments, StripeRefunds, load_outcomes, parse_since, prior_effects, reconcile
 from .reconcile import render as render_reconciliation
 from .reconcile import summarise as summarise_reconciliation
 from .report import render, summarise
@@ -221,6 +221,8 @@ def reconcile_main(args: argparse.Namespace) -> int:
             raise ValueError("--since applies to --system stripe only")
         if args.match_metadata and args.system != "stripe":
             raise ValueError("--match-metadata applies to --system stripe only")
+        if args.match_metadata and not METADATA_KEY.fullmatch(args.match_metadata):
+            raise ValueError("--match-metadata must be 1-40 of A-Z a-z 0-9 _ -")
         signing_key = None
         if args.signing_key:
             password = os.environ.get(SIGNING_PASSWORD_ENV)
