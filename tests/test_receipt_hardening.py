@@ -646,6 +646,25 @@ def test_a_failed_evidence_log_write_never_replaces_the_tools_exception(tmp_path
         assert any("evidence log write failed: OSError" in note for note in caught.value.__notes__)
 
 
+def test_an_anchor_failure_raised_as_an_error_still_tracks_the_billed_effect(tmp_path):
+    """The attack: under -W error the anchor warning skips billing, so the effect bills twice."""
+    import warnings
+
+    from agent_readback import AlreadyBilled
+
+    def broken_anchor(count, head):
+        raise OSError("anchor offline")
+
+    log = ReceiptLog(tmp_path / "r.jsonl", key=KEY, anchor=broken_anchor)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        with pytest.raises(RuntimeWarning, match="anchor failed"):
+            log.append(issue_receipt(verdict(), KEY, effect="stripe:refund:re_1"))  # written, then the warning raises
+        with pytest.raises(AlreadyBilled):
+            log.append(issue_receipt(verdict(), KEY, effect="stripe:refund:re_1"))
+    assert [r["billable"] for r in ReceiptLog(log.path, key=KEY).receipts()] == [True]
+
+
 def test_a_receipt_log_bills_each_effect_once(tmp_path):
     from agent_readback import AlreadyBilled
 

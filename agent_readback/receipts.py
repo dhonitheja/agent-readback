@@ -505,8 +505,13 @@ class ReceiptLog(EvidenceLog):
         return {} if self.signing_key is None else {"place": _place(self.signing_key, seq, self._place_link, body)}
 
     def _wrote(self, record: dict[str, Any]) -> None:
+        # Runs once the record is on disk and before the anchor is told, so an
+        # anchor failure raised as an error cannot leave a billed effect untracked.
         if "place" in record:
             self._place_link, self._placed = record["place"]["link"], True
+        body = record["body"]
+        if self._contents_checked and body.get("verdict") == ReceiptVerdict.VERIFIED.value and body.get("effect_digest"):
+            self._billed.add(body["effect_digest"])
 
     def append(self, receipt: Receipt) -> str:  # type: ignore[override]
         if not isinstance(receipt, Receipt):
@@ -529,10 +534,7 @@ class ReceiptLog(EvidenceLog):
             digest = receipt.effect_digest if receipt.billable else None
             if digest and digest in self._billed:
                 raise AlreadyBilled(f"{self.path.name} already holds a verified receipt for this effect")
-            written = self._write(receipt.to_dict())
-            if digest:
-                self._billed.add(digest)
-            return written
+            return self._write(receipt.to_dict())  # _wrote() records the billed effect
 
     def _check(self, body: dict[str, Any]) -> str | None:
         if isinstance(body, dict) and body.get("mac_alg") == SIG_ALG:
