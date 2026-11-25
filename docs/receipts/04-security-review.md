@@ -1,6 +1,6 @@
 # Readback Receipts: security verification
 
-Status: 2026-11-25. Phase 5 (Verify). Branch `feature/readback-receipts`.
+Status: 2026-11-25, updated after fixing the residual risks. Phase 5 (Verify). Branch `feature/readback-receipts`.
 Reviewed against `01-requirements.md` (SEC-1 to SEC-11) and every threat in
 `02-threat-model.md`. This is the maintainer's own review, done with automated
 tools and a manual read of the new code. It is not an external audit, and no
@@ -11,11 +11,11 @@ know of has a defence and a test, and that what is left is written down.
 
 | Check | Tool and scope | Result |
 |---|---|---|
-| Tests | `pytest`, full suite | 319 tests: 314 pass, 5 Windows-only ACL tests skip on Linux. 113 are new (62 receipts, 51 reconciliation and CLI) |
+| Tests | `pytest`, full suite, run twice | 340 tests: 335 pass, 5 Windows-only ACL tests skip on Linux. 134 are new (62 receipts, 51 reconciliation and CLI, 21 for the fixes below) |
 | Static analysis | `bandit 1.9.4 -r agent_readback examples` (the CI gate) | Clean. One new low finding (B105 on the environment variable *name* `READBACK_FHIR_TOKEN`) is a false positive, marked `# nosec B105` with the reason |
 | Static analysis, wider | `ruff` rules F, E9, B, S on the changed files | Nothing new to fix. `zip()` in the CSV parser now uses `strict=True`. The other hits are the same B105 name, the existing `icacls` call in `evidence.py` (fixed argument list, no shell) and an existing `__call__` check moved unchanged into `_is_async` |
-| Dependency audit | `pip-audit 2.10.1 --skip-editable` | No known vulnerabilities. No new runtime dependency: httpx is still the only one |
-| Secret scanning | `detect-secrets 1.5.0` over every tracked file, and a pattern search of the whole git history for live Stripe, Anthropic, OpenAI and AWS keys | Clean. The one hit was the fake `user:pw` URL that a test feeds to the CLI to prove it is refused; it is marked `pragma: allowlist secret`. CI now runs this check on every push (`security` job) |
+| Dependency audit | `pip-audit 2.10.1 --skip-editable`, with `cryptography` installed | No known vulnerabilities. No new runtime dependency: httpx is still the only one; `cryptography` is only in the optional `signatures` extra |
+| Secret scanning | `detect-secrets 1.5.0` over every tracked file, and a pattern search of the whole git history for live Stripe, Anthropic, OpenAI and AWS keys | Clean. The hits were two environment variable names and the fake `user:pw` URL that a test feeds to the CLI to prove it is refused; each is marked `pragma: allowlist secret`. CI now runs this check on every push (`security` job) |
 
 ## Controls checked by hand
 
@@ -37,25 +37,35 @@ know of has a defence and a test, and that what is left is written down.
 
 | # | Severity | Finding | Status |
 |---|---|---|---|
-| F1 | Medium (existing code) | `FhirAppointmentVerifier._one` put a claimed Appointment id straight into the URL. httpx resolves `Appointment/1/../2` (and `../Patient/1`) to another resource, so a crafted id made the verifier read a different record with its token. The field check still stopped a false `verified`, so this was a data-read issue, not a verdict issue. Reconciliation reads ids from a vendor's file, which made it reachable | Fixed: ids must match the FHIR id format and not be only dots. `test_fhir_id_cannot_walk_the_path` |
-| F2 | Low | Regexes anchored with `$` also match before a trailing newline. All new patterns use `fullmatch` | Fixed in new code |
-| F3 | Low (existing code) | The same `$` pattern is used for SQL identifiers (`verifiers/sql.py`) and for hash checks in `evidence.py`. SQL identifiers come from the developer's code, not from input, and a hash with a newline still fails the comparison, so neither is exploitable as far as we can see | Not changed on this branch; worth a small follow-up |
-| F4 | Low | `ReceiptLog`, like `EvidenceLog`, follows a symlink at the receipts path. A symlink to a file with content is refused, because that content is not a receipt log | Residual: keep receipt logs in a folder only you can write |
+| F1 | Medium (existing code) | `FhirAppointmentVerifier._one` put a claimed Appointment id straight into the URL. httpx resolves `Appointment/1/../2` to another resource, so a crafted id made the verifier read a different record with its token. The field check still stopped a false `verified` | Fixed: ids must be valid FHIR ids and not only dots. `test_fhir_id_cannot_walk_the_path` |
+| F2 | Low | Regexes anchored with `$` also match before a trailing newline | Fixed in new code (`fullmatch`) |
+| F3 | Low (existing code) | The same `$` pattern in SQL identifier and placeholder checks, evidence hash and anchor checks, and the Windows SID check | Fixed: all use `fullmatch`. `test_sql_identifiers_and_placeholders_cannot_end_in_a_newline`, `test_an_anchor_head_with_a_trailing_newline_is_refused` |
+| F4 | Low | A receipt log path that is a symlink was followed | Fixed: refused. `test_a_symlinked_receipt_log_is_refused` |
 
-## Residual risks
+## Residual risks from the first review, and what became of each
 
-- **HMAC, not signatures.** Whoever can verify a receipt can also issue one.
-  Fine when the buyer checks their own vendor's export; a vendor-to-buyer flow
-  needs Ed25519 (roadmap step 14).
-- **The read-only credential is still on you.** A prefix check cannot prove an
-  `rk_` key or a FHIR token is read-only. Issue them that way.
-- **`--base-url` is trusted.** The credentials go wherever you point it, over
-  https.
-- **Outcome ids are stored as given.** They are the vendor's own references.
-  If a vendor puts personal data in them, it ends up in receipts and reports.
-- **Matching is by fields, not by intent.** A real refund that happens to match
-  a claim verifies it, even if the agent did not cause it. `--since` and
-  one-effect-one-outcome narrow this but cannot close it.
-- **Not tested** against a real vendor export, live Stripe or a production EHR.
-- **No external security or compliance (HIPAA) review** has been done
-  (roadmap step 12).
+| Risk | Now | Test |
+|---|---|---|
+| HMAC: whoever can verify can also issue | **Fixed in code.** Optional Ed25519 signing. The buyer checks with the public key alone and cannot make a receipt; a public-key check refuses HMAC receipts. The signing key file must be owner-only | `test_a_verifier_with_the_public_key_cannot_forge_or_edit`, `test_an_hmac_receipt_never_passes_a_public_key_check`, `test_cli_signs_and_a_buyer_checks_with_the_public_key_only`, `test_a_signing_key_others_can_read_is_refused` |
+| `--base-url` is trusted with the credentials | **Fixed for Stripe**: the key only goes to `api.stripe.com` or localhost. **Narrowed for FHIR**: https only, no credentials or query in the URL, redirects never followed, next links must stay on the same origin, and the command prints the server it reads. Which FHIR server is yours cannot be known from code | `test_the_stripe_key_only_goes_to_stripe`, `test_fhir_redirects_are_never_followed`, `test_cli_says_where_it_reads_and_never_the_key` |
+| Outcome ids stored as given | **Fixed in code.** Receipts store a keyed `oid_` stand-in by default; your own report still shows your ids. `--keep-outcome-ids` is an explicit opt-out | `test_receipts_carry_a_keyed_stand_in_for_outcome_ids`, `test_cli_hashes_outcome_ids_unless_told_to_keep_them` |
+| Matching by fields, not by intent | **Fixed for Stripe when the vendor tags refunds**: `--match-metadata KEY` only counts a refund whose metadata names the outcome. Metadata never reaches a receipt. Without tags, and for FHIR, matching is still by fields, narrowed by `--since` and one-effect-one-outcome | `test_match_metadata_ties_a_refund_to_its_outcome` |
+| Read-only credentials | **Not fixable in code.** Neither Stripe nor FHIR lets a client prove a key is read-only, and testing by writing would break the read-only rule. Mitigation: issue a Stripe restricted key with only `refunds: read` and a FHIR client with only read scope, keep them away from the agent, and confirm once in Stripe test mode, as the README's "Repeat sandbox validation" section describes: a small refund attempted with the restricted key must return `403 more_permissions_required` | `sk_` keys are still refused |
+| Not tested on real systems | **Not fixable in code.** Needs a run against Stripe test mode and a test EHR with real credentials (roadmap steps 4 and 13) | |
+| No external review | **Not fixable in code.** Needs outside reviewers (roadmap step 12) | |
+
+## What still depends on how you run it
+
+- **Key storage.** `READBACK_RECEIPT_KEY` and the Ed25519 private key decide
+  who can make receipts. Keep them in a secrets manager or an owner-only file,
+  never in the repo, and rotate them if a machine is lost. Publish only the
+  public key.
+- **Completeness for a public verifier.** With only the public key, a buyer
+  can prove each receipt is genuine and unedited, and that the records link,
+  but cannot recompute the keyed chain. To catch dropped newest receipts,
+  share the anchor head (`FileAnchor`) through a channel the issuer cannot
+  rewrite later.
+- **Folder access.** Keep receipt and evidence logs in a folder only the
+  writer can change.
+- No build can promise that a breach is impossible. These are the threats we
+  know of, each with a defence and a test.

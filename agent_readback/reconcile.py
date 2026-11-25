@@ -29,8 +29,9 @@ import httpx
 
 from .core import Claim, Finding, FindingKind, Status, Verdict, compare_fields
 from .receipts import (
-    Receipt, ReceiptLog, ReceiptVerdict, _OUTCOME_ID, effect_digest, issue_receipt, receipt_key,
+    Receipt, ReceiptLog, ReceiptVerdict, _OUTCOME_ID, effect_digest, outcome_ref, receipt_key,
 )
+from .receipts import issue_receipt as _issue  # wrapped per outcome in _one
 from .verifiers.fhir import CANCEL as FHIR_CANCEL
 from .verifiers.fhir import CREATE as FHIR_CREATE
 from .verifiers.fhir import FHIR_ID, UPDATE as FHIR_UPDATE
@@ -224,12 +225,24 @@ class _Reads:
         return self.cache[subject]
 
 
+_METADATA_KEY = re.compile(r"[A-Za-z0-9_-]{1,40}")  # Stripe metadata keys are at most 40 characters
+
+
 class StripeRefunds:
-    def __init__(self, verifier: StripeRefundVerifier, since: int | None = None) -> None:
-        self.verifier, self.since = verifier, since
+    """Stripe refunds for each claimed payment intent.
+
+    `match_metadata` ties a refund to the outcome that caused it: the refund
+    must carry `metadata[KEY] == outcome_id`, so a refund that only happens to
+    match the amount cannot verify a claim it was not made for.
+    """
+
+    def __init__(self, verifier: StripeRefundVerifier, since: int | None = None, match_metadata: str | None = None) -> None:
+        if match_metadata is not None and not _METADATA_KEY.fullmatch(match_metadata):
+            raise ValueError("match_metadata must be 1-40 of A-Z a-z 0-9 _ -")
+        self.verifier, self.since, self.match_metadata = verifier, since, match_metadata
         self.reads = _Reads(verifier._refunds)
 
-    def find(self, claim: Claim) -> _Found:
+    def find(self, claim: Claim, outcome_id: str | None = None) -> _Found:
         outcome, refunds = self.reads(claim.expected["payment_intent"])
         if outcome == "error":
             return _Found(error=refunds)
@@ -241,6 +254,11 @@ class StripeRefunds:
                     return _Found(error="refund without a creation time")
                 if item["created"] < self.since:
                     continue
+            if self.match_metadata is not None:
+                metadata = item.get("metadata")
+                if not isinstance(metadata, dict) or metadata.get(self.match_metadata) != outcome_id:
+                    continue
+            item = {k: v for k, v in item.items() if k != "metadata"}  # never digest free-form metadata
             if compare_fields(match_on, item):
                 continue
             effect = f"stripe:refund:{refund_id}"
@@ -262,7 +280,7 @@ class FhirAppointments:
         self.lists = _Reads(verifier._appointments)
         self.ones = _Reads(verifier._one)
 
-    def find(self, claim: Claim) -> _Found:
+    def find(self, claim: Claim, outcome_id: str | None = None) -> _Found:
         expected = _normalized(claim.expected)
         if claim.action == FHIR_CREATE:
             outcome, items = self.lists(expected["patient"])
@@ -288,12 +306,15 @@ class FhirAppointments:
 
 # -- reconciliation ---------------------------------------------------------------
 
-def prior_effects(paths: Iterable[str | Path], key: bytes | str | None = None) -> set[str]:
-    """Effect digests already billed: from verified receipts in earlier receipt logs (chain checked)."""
+def prior_effects(paths: Iterable[str | Path], key: bytes | str | None = None, *, public_key: Any = None) -> set[str]:
+    """Effect digests already billed: from verified receipts in earlier receipt logs (chain checked).
+
+    `public_key` checks Ed25519-signed receipts in those logs.
+    """
     secret = receipt_key(key)
     used: set[str] = set()
     for path in paths:
-        log = ReceiptLog(path, key=secret)
+        log = ReceiptLog(path, key=secret, public_key=public_key)
         problems = log.verify()
         if problems:
             raise ValueError(f"prior receipt log {Path(path).name} does not verify: {problems[0]}")
@@ -308,31 +329,50 @@ def reconcile(
     *,
     prior: AbstractSet[str] = frozenset(),
     receipts: ReceiptLog | None = None,
+    keep_outcome_ids: bool = False,
+    labels: dict[str, str] | None = None,
+    signing_key: Any = None,
 ) -> list[Receipt]:
-    """Read back every outcome in order and return (and log, if `receipts`) one receipt each."""
+    """Read back every outcome in order and return (and log, if `receipts`) one receipt each.
+
+    Receipts carry a keyed stand-in for each outcome id (`oid_...`) unless
+    `keep_outcome_ids`, because a vendor's references can hold personal data.
+    Pass a `labels` dict to get receipt_id -> original outcome id for your own report.
+    Signs with `signing_key`, else the receipt log's signing key, if either is set.
+    """
     secret = receipt_key(key)
+    if signing_key is None and receipts is not None:
+        signing_key = receipts.signing_key
     prior, used = frozenset(prior), set(prior)
     seen_ids: set[str] = set()
     out: list[Receipt] = []
     for outcome in outcomes:
-        receipt = _one(outcome, finder, secret, used, seen_ids, prior)
+        ref = outcome.outcome_id if keep_outcome_ids else outcome_ref(secret, outcome.outcome_id)
+        receipt = _one(outcome, ref, finder, secret, used, seen_ids, prior, signing_key)
+        if labels is not None:
+            labels[receipt.receipt_id] = outcome.outcome_id
         if receipts is not None:
             receipts.append(receipt)
         out.append(receipt)
     return out
 
 
-def _one(outcome: Outcome, finder: Any, key: bytes, used: set[str], seen_ids: set[str], prior: AbstractSet[str]) -> Receipt:
+def _one(outcome: Outcome, ref: str, finder: Any, key: bytes, used: set[str], seen_ids: set[str],
+         prior: AbstractSet[str], signing_key: Any) -> Receipt:
     claim, oid = outcome.claim, outcome.outcome_id
+
+    def issue_receipt(verdict: Verdict, key: bytes, **options: Any) -> Receipt:
+        return _issue(verdict, key, outcome_id=ref, signing_key=signing_key, **options)
+
     if oid in seen_ids:
         verdict = Verdict(Status.FAILED, claim)
-        return issue_receipt(verdict, key, outcome_id=oid, override=ReceiptVerdict.CONTRADICTED,
+        return issue_receipt(verdict, key, override=ReceiptVerdict.CONTRADICTED,
                              extra_reasons=["duplicate_outcome"])
     seen_ids.add(oid)
-    found = finder.find(claim)
+    found = finder.find(claim, oid)
     if found.error is not None:
         verdict = Verdict(Status.UNVERIFIED, claim, (Finding(FindingKind.UNREACHABLE, "read failed"),))
-        return issue_receipt(verdict, key, outcome_id=oid)
+        return issue_receipt(verdict, key)
     for pool, status in ((found.matches, Status.VERIFIED), (found.pending, Status.UNVERIFIED)):
         for effect, item in pool:
             digest = effect_digest(key, effect)
@@ -341,21 +381,23 @@ def _one(outcome: Outcome, finder: Any, key: bytes, used: set[str], seen_ids: se
             used.add(digest)
             findings = () if status is Status.VERIFIED else (Finding(FindingKind.PENDING, "not settled yet"),)
             verdict = Verdict(status, claim, findings, {"matched": item})
-            return issue_receipt(verdict, key, outcome_id=oid, effect=effect)
+            return issue_receipt(verdict, key, effect=effect)
     if found.matches or found.pending:
         # Something matches, but it already backs another outcome: earlier in this file, or billed before.
         digests = {effect_digest(key, e) for e, _ in found.matches + found.pending}
         reason = "already_billed" if digests <= prior else "duplicate_effect"
-        return issue_receipt(Verdict(Status.FAILED, claim), key, outcome_id=oid,
+        return issue_receipt(Verdict(Status.FAILED, claim), key,
                              override=ReceiptVerdict.CONTRADICTED, extra_reasons=[reason])
     if found.contradicted:
-        return issue_receipt(Verdict(Status.FAILED, claim, tuple(found.contradicted)), key, outcome_id=oid)
+        return issue_receipt(Verdict(Status.FAILED, claim, tuple(found.contradicted)), key)
     missing = Finding(FindingKind.MISSING, "no matching effect in the system of record")
-    return issue_receipt(Verdict(Status.FAILED, claim, (missing,)), key, outcome_id=oid)
+    return issue_receipt(Verdict(Status.FAILED, claim, (missing,)), key)
 
 
-def summarise(receipts: Iterable[Receipt | dict[str, Any]]) -> dict[str, Any]:
+def summarise(receipts: Iterable[Receipt | dict[str, Any]], labels: dict[str, str] | None = None) -> dict[str, Any]:
+    """Billed against verified. `labels` (from `reconcile`) shows your own outcome ids instead of `oid_...`."""
     rows = [r.to_dict() if isinstance(r, Receipt) else r for r in receipts]
+    labels = labels or {}
     counts = {v.value: 0 for v in ReceiptVerdict}
     for row in rows:
         counts[row["verdict"]] += 1
@@ -367,7 +409,7 @@ def summarise(receipts: Iterable[Receipt | dict[str, Any]]) -> dict[str, Any]:
         "verified_rate": round(verified / billed, 4) if billed else None,
         "counts": counts,
         "not_verified": [
-            {"outcome_id": row["outcome_id"], "verdict": row["verdict"], "reasons": sorted({r["kind"] for r in row["reasons"]})}
+            {"outcome_id": labels.get(row["receipt_id"], row["outcome_id"]), "verdict": row["verdict"], "reasons": sorted({r["kind"] for r in row["reasons"]})}
             for row in rows if row["verdict"] != ReceiptVerdict.VERIFIED.value
         ],
     }

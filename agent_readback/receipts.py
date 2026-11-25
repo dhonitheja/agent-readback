@@ -11,6 +11,11 @@ Every receipt carries an HMAC-SHA256 under a receipt key (`key=` or the
 least 32 bytes, and must differ from the evidence-log and alert keys: anyone
 who holds it can check receipts and can also make them.
 
+For receipts that someone else must be able to check without being able to
+make them, sign with Ed25519 as well (`signing_key=`, optional extra
+`agent-readback[signatures]`): the receipt then carries `mac_alg: ed25519`
+and verifies with the public key alone. The HMAC key still keys the digests.
+
     receipts = ReceiptLog("receipts.jsonl")         # key from READBACK_RECEIPT_KEY
     receipt = issue_receipt(verdict, receipts.key, outcome_id="fin-00412")
     receipts.append(receipt)
@@ -39,12 +44,14 @@ from .evidence import EvidenceLog, is_log_key
 RECEIPT_KEY_ENV = "READBACK_RECEIPT_KEY"
 RECEIPT_VERSION = 1
 MAC_ALG = "hmac-sha256"
+SIG_ALG = "ed25519"
 MIN_KEY_BYTES = 32
 _MAC_DOMAIN = b"readback-receipt-v1:"
 _OUTCOME_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")  # first character never a spreadsheet formula
 _ACTION = re.compile(r"^[a-z0-9_]+(\.[a-z0-9_]+){1,4}$")
 _RECEIPT_ID = re.compile(r"^rcpt_[0-9a-f]{32}$")
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
+_HEX128 = re.compile(r"^[0-9a-f]{128}$")
 
 # Value-free descriptions of each read-back, so a receipt says where it looked
 # without saying which customer it looked at.
@@ -103,6 +110,39 @@ def receipt_key(key: bytes | str | None = None) -> bytes:
     return raw
 
 
+def _crypto() -> Any:
+    try:
+        from cryptography.hazmat.primitives.asymmetric import ed25519
+    except ImportError:
+        raise ImportError("Ed25519 receipts need the cryptography package: pip install 'agent-readback[signatures]'") from None
+    return ed25519
+
+
+def load_signing_key(path: str | Path, password: bytes | None = None) -> Any:
+    """An Ed25519 private key from a PEM file that only its owner can read (POSIX)."""
+    ed25519 = _crypto()
+    from cryptography.hazmat.primitives import serialization
+
+    path = Path(path)
+    if os.name == "posix" and path.stat().st_mode & 0o077:
+        raise ReceiptKeyError(f"{path} must be readable by its owner only (chmod 600)")
+    key = serialization.load_pem_private_key(path.read_bytes(), password=password)
+    if not isinstance(key, ed25519.Ed25519PrivateKey):
+        raise ReceiptKeyError(f"{path} is not an Ed25519 private key")
+    return key
+
+
+def load_public_key(path: str | Path) -> Any:
+    """An Ed25519 public key from a PEM file."""
+    ed25519 = _crypto()
+    from cryptography.hazmat.primitives import serialization
+
+    key = serialization.load_pem_public_key(Path(path).read_bytes())
+    if not isinstance(key, ed25519.Ed25519PublicKey):
+        raise ReceiptKeyError(f"{path} is not an Ed25519 public key")
+    return key
+
+
 def canonical(value: Any) -> bytes:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True, default=str).encode()
 
@@ -110,6 +150,11 @@ def canonical(value: Any) -> bytes:
 def keyed_digest(key: bytes, label: str, value: Any) -> str:
     """HMAC-SHA256 of a labelled canonical value. The label keeps digests of different roles apart."""
     return hmac.new(key, label.encode() + b":" + canonical(value), hashlib.sha256).hexdigest()
+
+
+def outcome_ref(key: bytes, outcome_id: str) -> str:
+    """A keyed stand-in for an outcome id, so a receipt never carries the vendor's own reference."""
+    return "oid_" + keyed_digest(key, "outcome", outcome_id)[:32]
 
 
 def _subject(action: str, expected: dict[str, Any], subject_fields: Iterable[str] | None) -> dict[str, Any] | None:
@@ -166,6 +211,20 @@ def _mac(key: bytes, unsigned: dict[str, Any]) -> str:
     return hmac.new(key, _MAC_DOMAIN + canonical(unsigned), hashlib.sha256).hexdigest()
 
 
+def _sign(signing_key: Any, unsigned: dict[str, Any]) -> str:
+    return signing_key.sign(_MAC_DOMAIN + canonical(unsigned)).hex()
+
+
+def _signature_ok(public_key: Any, unsigned: dict[str, Any], signature: str) -> bool:
+    from cryptography.exceptions import InvalidSignature
+
+    try:
+        public_key.verify(bytes.fromhex(signature), _MAC_DOMAIN + canonical(unsigned))
+    except InvalidSignature:
+        return False
+    return True
+
+
 def issue_receipt(
     verdict: Verdict,
     key: bytes | str | None = None,
@@ -175,6 +234,7 @@ def issue_receipt(
     override: ReceiptVerdict | None = None,
     extra_reasons: Iterable[str] = (),
     subject_fields: Iterable[str] | None = None,
+    signing_key: Any = None,
     now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
 ) -> Receipt:
     """Turn a Readback verdict into a signed receipt.
@@ -182,6 +242,8 @@ def issue_receipt(
     `effect` names the matched real-world effect (defaults to `effect_of(verdict)`);
     only its keyed digest is stored. `override` and `extra_reasons` let
     reconciliation mark an effect that already backs another outcome.
+    With `signing_key` (Ed25519) the receipt is signed instead of MACed, so it
+    verifies with the public key alone.
     """
     secret = receipt_key(key)
     claim = verdict.claim
@@ -212,7 +274,11 @@ def issue_receipt(
         subject_digest=keyed_digest(secret, "subject", subject) if subject else None,
         observed_digest=keyed_digest(secret, "observed", verdict.observed) if verdict.observed is not None else None,
         effect_digest=effect_digest(secret, effect) if effect else None,
+        mac_alg=SIG_ALG if signing_key is not None else MAC_ALG,
     )
+    if signing_key is not None:
+        _crypto()
+        return Receipt(**{**receipt.__dict__, "mac": _sign(signing_key, receipt.unsigned())})
     return Receipt(**{**receipt.__dict__, "mac": _mac(secret, receipt.unsigned())})
 
 
@@ -228,12 +294,15 @@ _FIELDS = {
 }
 
 
-def verify_receipt(receipt: dict[str, Any], key: bytes | str | None = None) -> str | None:
+def verify_receipt(receipt: dict[str, Any], key: bytes | str | None = None, *, public_key: Any = None) -> str | None:
     """None if `receipt` is intact and was made with `key`; otherwise what is wrong.
 
+    With `public_key`, an Ed25519-signed receipt is checked against it and no
+    receipt key is needed; an HMAC receipt is then refused, because a public
+    verifier must not accept what anyone holding the shared key could make.
     Checks the layout first, so a malformed receipt is reported, not crashed on.
     """
-    secret = receipt_key(key)
+    secret = receipt_key(key) if public_key is None else None
     if not isinstance(receipt, dict):
         return "not a receipt object"
     if set(receipt) != set(_FIELDS):
@@ -244,18 +313,32 @@ def verify_receipt(receipt: dict[str, Any], key: bytes | str | None = None) -> s
             return f"{name} has the wrong type"
     if receipt["receipt_version"] != RECEIPT_VERSION:
         return f"unsupported receipt_version {receipt['receipt_version']!r}"
-    if receipt["mac_alg"] != MAC_ALG:
+    if receipt["mac_alg"] not in (MAC_ALG, SIG_ALG):
         return f"unsupported mac_alg {receipt['mac_alg']!r}"
+    if public_key is not None and receipt["mac_alg"] != SIG_ALG:
+        return "not signed with Ed25519: a public key cannot check it"
+    if public_key is None and receipt["mac_alg"] == SIG_ALG:
+        return "signed with Ed25519: check it with the issuer's public key"
     if not _RECEIPT_ID.fullmatch(receipt["receipt_id"]) or not _ACTION.fullmatch(receipt["action"]):
         return "bad receipt_id or action"
     if receipt["verdict"] not in {v.value for v in ReceiptVerdict}:
         return "unknown verdict"
     if receipt["billable"] is not (receipt["verdict"] == ReceiptVerdict.VERIFIED.value):
         return "billable does not match the verdict"
-    for name in ("claim_digest", "subject_digest", "observed_digest", "effect_digest", "mac"):
+    if receipt["outcome_id"] is not None and not _OUTCOME_ID.fullmatch(receipt["outcome_id"]):
+        return "bad outcome_id"
+    for name in ("claim_digest", "subject_digest", "observed_digest", "effect_digest"):
         if receipt[name] is not None and not _HEX64.fullmatch(receipt[name]):
             return f"{name} must be 64 lowercase hex characters"
     unsigned = {k: v for k, v in receipt.items() if k != "mac"}
+    if receipt["mac_alg"] == SIG_ALG:
+        if not _HEX128.fullmatch(receipt["mac"]):
+            return "mac must be a 128-character hex Ed25519 signature"
+        if not _signature_ok(public_key, unsigned, receipt["mac"]):
+            return "the signature does not match: the receipt was edited or signed by another key"
+        return None
+    if not _HEX64.fullmatch(receipt["mac"]):
+        return "mac must be 64 lowercase hex characters"
     if not hmac.compare_digest(receipt["mac"], _mac(secret, unsigned)):
         return "the MAC does not match: the receipt was edited or made with another key"
     return None
@@ -275,8 +358,13 @@ class ReceiptLog(EvidenceLog):
     def _resolve_key(key: bytes | str | None) -> bytes:
         return receipt_key(key)
 
-    def __init__(self, path: str | Path, key: bytes | str | None = None, anchor: Any = None) -> None:
+    def __init__(self, path: str | Path, key: bytes | str | None = None, anchor: Any = None, *,
+                 signing_key: Any = None, public_key: Any = None) -> None:
+        if Path(path).is_symlink():
+            raise ValueError(f"{path} is a symbolic link; give the receipt log's real path")
         super().__init__(path, key=key, anchor=anchor)
+        self.signing_key = signing_key
+        self.public_key = public_key if public_key is not None or signing_key is None else signing_key.public_key()
         for number, record in enumerate(self.records()):
             if record["body"].get("receipt_version") is None:
                 raise ValueError(f"{self.path} is not a receipt log (record {number} is not a receipt)")
@@ -284,11 +372,18 @@ class ReceiptLog(EvidenceLog):
     def append(self, receipt: Receipt) -> str:  # type: ignore[override]
         if not isinstance(receipt, Receipt):
             raise TypeError("ReceiptLog.append takes a Receipt")
-        problem = verify_receipt(receipt.to_dict(), self.key)
+        problem = self._check(receipt.to_dict())
         if problem:
             raise ValueError(f"refusing to log a receipt that does not verify with this log's key: {problem}")
         with self._lock:
             return self._write(receipt.to_dict())
+
+    def _check(self, body: dict[str, Any]) -> str | None:
+        if isinstance(body, dict) and body.get("mac_alg") == SIG_ALG:
+            if self.public_key is None:
+                return "signed with Ed25519: open the log with public_key= or signing_key="
+            return verify_receipt(body, public_key=self.public_key)
+        return verify_receipt(body, self.key)
 
     def receipts(self) -> list[dict[str, Any]]:
         return [record["body"] for record in self.records()]
@@ -300,7 +395,36 @@ class ReceiptLog(EvidenceLog):
         if not intact:
             problems.append(f"chain broken at record {bad} (line {bad + 1})")
         for number, body in enumerate(self.receipts()):
-            problem = verify_receipt(body, self.key)
+            problem = self._check(body)
             if problem:
                 problems.append(f"record {number}: {problem}")
         return problems
+
+
+def verify_signed_receipts(path: str | Path, public_key: Any) -> tuple[int, list[str]]:
+    """Check a receipt log you did not write, with the issuer's Ed25519 public key only.
+
+    Proves each receipt came from the issuer and was not edited, and that the
+    records still link up. It cannot recompute the keyed chain, so a full
+    rewrite of the links or dropped newest records need the issuer's anchor.
+    Returns (number of receipts, problems).
+    """
+    problems: list[str] = []
+    previous = "0" * 64
+    count = 0
+    with open(path, encoding="utf-8") as handle:
+        for number, line in enumerate(handle):
+            try:
+                record = json.loads(line)
+            except ValueError:
+                problems.append(f"record {number}: not JSON")
+                continue
+            count += 1
+            if not isinstance(record, dict) or record.get("seq") != number or record.get("prev") != previous:
+                problems.append(f"record {number}: out of order or not linked to the record before")
+            body = record.get("body") if isinstance(record, dict) else None
+            problem = verify_receipt(body, public_key=public_key) if isinstance(body, dict) else "no receipt body"
+            if problem:
+                problems.append(f"record {number}: {problem}")
+            previous = record.get("hash") if isinstance(record, dict) else None
+    return count, problems

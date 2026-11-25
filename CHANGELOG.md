@@ -20,7 +20,17 @@ All notable changes to `agent-readback`. Dates are UTC.
 - `receipted()` and `OutcomeNotVerified`: a tool wrapper that writes a receipt
   and raises unless the outcome is verified, so an agent cannot report done on
   an outcome the system does not show.
-- Stripe verifier reads the refund `created` time.
+- Optional Ed25519 receipts (`agent-readback[signatures]`): `signing_key=` on
+  `issue_receipt`, `ReceiptLog` and `reconcile`, `reconcile --signing-key`,
+  `verify-receipts --public-key` (no receipt key needed) and
+  `verify_signed_receipts()`. A public-key check refuses HMAC receipts.
+- Receipts store a keyed `oid_...` stand-in for outcome ids by default
+  (`--keep-outcome-ids` to store them as given).
+- `reconcile --match-metadata KEY`: a Stripe refund only counts if its metadata
+  names the outcome.
+- `reconcile` only sends the Stripe key to `api.stripe.com` or localhost, and
+  prints which server it reads.
+- Stripe verifier reads the refund `created` time and `metadata`.
 - Requirements, STRIDE threat model, design and security review in
   `docs/receipts/`.
 
@@ -43,6 +53,9 @@ All notable changes to `agent-readback`. Dates are UTC.
   it goes into a URL. An id such as `1/../2` used to be resolved by httpx to a
   different resource, read with the verifier's token (the field check still
   stopped a false `verified`).
+- Pattern checks for SQL identifiers and placeholders, evidence hashes, anchor
+  heads and Windows SIDs match the whole string; `$` used to accept a
+  trailing newline.
 
 ## 0.3.1 — 2026-11-22
 

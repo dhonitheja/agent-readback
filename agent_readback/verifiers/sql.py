@@ -27,7 +27,7 @@ _PLACEHOLDER = re.compile(r"^(\?|%s|:[A-Za-z_][A-Za-z0-9_]*|:[1-9][0-9]*|\$[1-9]
 
 
 def _ident(name: str) -> str:
-    if not _IDENT.match(name):
+    if not _IDENT.fullmatch(name):
         raise ValueError(f"unsafe SQL identifier: {name!r}")
     return name
 
@@ -37,7 +37,7 @@ class SqlRowVerifier:
         self.connect = connect
         self.table = _ident(table)
         self.key_column = _ident(key_column)
-        if not _PLACEHOLDER.match(placeholder):  # it is spliced into the query text
+        if not _PLACEHOLDER.fullmatch(placeholder):  # it is spliced into the query text
             raise ValueError(f"unsafe SQL placeholder: {placeholder!r}")
         self.placeholder = placeholder
 

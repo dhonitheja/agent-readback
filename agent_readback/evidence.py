@@ -132,7 +132,7 @@ def _owner_only(path: Path) -> None:
             )
             who = run("whoami.exe", "/user", "/fo", "csv", "/nh")
             sid = who.stdout.strip().rsplit(",", 1)[-1].strip('"') if who.returncode == 0 else ""
-            if not _SID.match(sid):
+            if not _SID.fullmatch(sid):
                 failed = f"could not read the current user's SID: {(who.stderr or who.stdout).strip()!r}"
             else:
                 # /reset drops explicit entries (some hosts, e.g. GitHub's Windows runners,
@@ -177,7 +177,7 @@ class FileAnchor:
             count, head = data["count"], data["head"]
         except (ValueError, KeyError, TypeError) as error:
             raise ValueError(f"{self.path} is not a Readback anchor: {error}") from None
-        if type(count) is not int or count < 1 or not isinstance(head, str) or not _HEX64.match(head):
+        if type(count) is not int or count < 1 or not isinstance(head, str) or not _HEX64.fullmatch(head):
             raise ValueError(f"{self.path} is not a Readback anchor: bad count or head")
         return count, head
 
@@ -274,7 +274,7 @@ class EvidenceLog:
                 if not isinstance(record["body"], dict):
                     raise ValueError("body must be an object")
                 for name in ("hash", "prev"):  # compare_digest rejects non-ASCII strings with a TypeError
-                    if not isinstance(record[name], str) or not _HEX64.match(record[name]):
+                    if not isinstance(record[name], str) or not _HEX64.fullmatch(record[name]):
                         raise ValueError(f"{name} must be 64 lowercase hex characters")
             except ValueError as error:
                 raise ValueError(f"line {number + 1} of {self.path} is not an evidence record: {error}") from None

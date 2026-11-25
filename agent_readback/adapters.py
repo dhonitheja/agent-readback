@@ -164,7 +164,7 @@ def receipted(
         if not seen:
             return None  # to_claim returned None: nothing was checked
         oid = outcome_id(*args, **kwargs) if outcome_id is not None else None
-        receipt = issue_receipt(seen[-1], receipts.key, outcome_id=oid)
+        receipt = issue_receipt(seen[-1], receipts.key, outcome_id=oid, signing_key=receipts.signing_key)
         receipts.append(receipt)
         for callback in receipt_callbacks:
             callback(receipt)

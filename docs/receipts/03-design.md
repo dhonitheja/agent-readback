@@ -113,8 +113,11 @@ the model sees "outcome not verified: missing" instead of a success.
   buyer reconciling) issues and checks receipts with their own key.
 - **Decision**: HMAC-SHA256 with a dedicated `READBACK_RECEIPT_KEY`.
 - **Consequences**: no new dependency. Anyone able to verify can also issue.
-  A vendor-to-buyer flow needs Ed25519 later, as an optional extra
-  (`cryptography`), with `mac_alg: ed25519`.
+- **Amended 2026-11-25**: optional Ed25519 signing (extra `signatures`,
+  `cryptography`). A signed receipt has `mac_alg: ed25519` and a 128-hex
+  signature over the same domain-prefixed canonical JSON; the HMAC key still
+  keys the digests and the log chain. `verify-receipts --public-key` checks
+  signatures and record links with no secret, and refuses HMAC receipts.
 
 ### ADR-R3: A separate receipt key, required, at least 32 bytes
 - **Context**: receipts are meant to be shared; the evidence-log key must

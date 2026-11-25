@@ -5,7 +5,10 @@ from .alerts import WebhookAlert
 from .core import Claim, Finding, FindingKind, Status, Verdict, Verifier, compare_fields, recheck, watch
 from .evidence import EvidenceLog, FileAnchor
 from .ratelimit import RateLimit, RateLimitTimeout, limit_reads
-from .receipts import Receipt, ReceiptKeyError, ReceiptLog, ReceiptVerdict, issue_receipt, verify_receipt
+from .receipts import (
+    Receipt, ReceiptKeyError, ReceiptLog, ReceiptVerdict, issue_receipt, load_public_key, load_signing_key,
+    verify_receipt, verify_signed_receipts,
+)
 
 __version__ = "0.3.1"
 __all__ = [
@@ -31,7 +34,7 @@ __all__ = [
     "mcp_text",
     "receipted",
     "recheck",
-    "verify_receipt",
+    "verify_receipt", "verify_signed_receipts", "load_signing_key", "load_public_key",
     "watch",
     "watched",
 ]
